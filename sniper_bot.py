@@ -5,12 +5,14 @@ import feedparser
 import os
 from dotenv import load_dotenv
 from google import genai
+from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, PushMessageRequest, TextMessage
 
 # 載入 API 金鑰
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FUGLE_API_KEY = os.getenv("FUGLE_API_KEY")
-LINE_NOTIFY_TOKEN = os.getenv("LINE_NOTIFY_TOKEN")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_USER_ID = os.getenv("LINE_USER_ID")
 # --- 1. 設定你的中小型觀察清單 ---
 target_tickers = [
     "0050.TW", 
@@ -90,42 +92,26 @@ def analyze_breakout_real_or_fake(ticker, company_name, headlines, tech_info):
     except Exception as e:
         return f"X AI 分析失敗：{e}"
 
-# --- 3.5 LINE Notify 傳播模組 (標準雲端版) ---
+# --- 3.5 LINE Messaging API 傳播模組 ---
 def send_line_notify(message):
-    """將文字訊息推播至 LINE"""
-    if not LINE_NOTIFY_TOKEN:
-        print("⚠️ 未設定 LINE Notify Token，略過推播。")
+    """將文字訊息推播至 LINE Messaging API"""
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("⚠️ 未設定 LINE_CHANNEL_ACCESS_TOKEN 或 LINE_USER_ID，略過推播。")
         return
         
-    url = "https://notify-api.line.me/api/notify"
-    headers = {
-        "Authorization": f"Bearer {LINE_NOTIFY_TOKEN}"
-    }
-    payload = {
-        "message": message
-    }
-    
-    import requests
-    import time
-    
-    # 移除複雜的 Session，使用最標準的 requests 呼叫
-    for attempt in range(3):
-        try:
-            response = requests.post(url, headers=headers, data=payload, timeout=10)
-            if response.status_code == 200:
-                print("📲 LINE 通知發送成功！")
-                return 
-            else:
-                print(f"⚠️ LINE 通知發送失敗，狀態碼: {response.status_code}")
-                break 
-                
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ 網路連線異常 (第 {attempt+1}/3 次): {e}")
-            if attempt < 2:
-                print("   > 3 秒後自動重試...")
-                time.sleep(3)
-            else:
-                print("❌ 重試失敗。")
+    try:
+        configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=LINE_USER_ID,
+                    messages=[TextMessage(text=message)]
+                )
+            )
+        print("📲 LINE 通知發送成功！")
+    except Exception as e:
+        print(f"⚠️ LINE 通知發送失敗: {e}")
 
 
 from fugle_marketdata import RestClient
