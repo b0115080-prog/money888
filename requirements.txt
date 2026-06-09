@@ -1,0 +1,7 @@
+yfinance
+pandas
+feedparser
+python-dotenv
+google-genai
+fugle-marketdata
+requests
