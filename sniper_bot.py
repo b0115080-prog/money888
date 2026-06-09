@@ -90,9 +90,9 @@ def analyze_breakout_real_or_fake(ticker, company_name, headlines, tech_info):
     except Exception as e:
         return f"X AI 分析失敗：{e}"
 
-# --- 3.5 LINE Notify 傳播模組 (強制突破代理版) ---
+# --- 3.5 LINE Notify 傳播模組 (標準雲端版) ---
 def send_line_notify(message):
-    """將文字訊息推播至 LINE (具備斷線重試與無視 Proxy 功能)"""
+    """將文字訊息推播至 LINE"""
     if not LINE_NOTIFY_TOKEN:
         print("⚠️ 未設定 LINE Notify Token，略過推播。")
         return
@@ -105,21 +105,13 @@ def send_line_notify(message):
         "message": message
     }
     
-    # 【關鍵破解】強迫 Python 不要使用任何系統代理伺服器 (Proxy)
-    session = requests.Session()
-    session.trust_env = False 
+    import requests
+    import time
     
+    # 移除複雜的 Session，使用最標準的 requests 呼叫
     for attempt in range(3):
         try:
-            # 這裡改用 session.post，並明確設定 proxies 為空
-            response = session.post(
-                url, 
-                headers=headers, 
-                data=payload, 
-                timeout=10,
-                proxies={"http": None, "https": None}
-            )
-            
+            response = requests.post(url, headers=headers, data=payload, timeout=10)
             if response.status_code == 200:
                 print("📲 LINE 通知發送成功！")
                 return 
@@ -131,10 +123,9 @@ def send_line_notify(message):
             print(f"⚠️ 網路連線異常 (第 {attempt+1}/3 次): {e}")
             if attempt < 2:
                 print("   > 3 秒後自動重試...")
-                import time
                 time.sleep(3)
             else:
-                print("❌ 重試失敗，這可能是更深層的系統網路限制。")
+                print("❌ 重試失敗。")
 
 
 from fugle_marketdata import RestClient
