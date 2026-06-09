@@ -5,3 +5,4 @@ python-dotenv
 google-genai
 fugle-marketdata
 requests
+line-bot-sdk
