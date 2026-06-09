@@ -1,0 +1,39 @@
+name: 台股主力狙擊機器人
+
+on:
+  schedule:
+    # 1. 台灣時間 上午 09:30 (盤中第一次掃描)
+    - cron: '30 1 * * 1-5'
+    
+    # 2. 台灣時間 上午 11:30 (盤中第二次掃描)
+    - cron: '30 3 * * 1-5'
+    
+    # 3. 台灣時間 下午 13:00 (收盤前最後突襲)
+    - cron: '00 5 * * 1-5'
+  
+  # 保持手動執行功能
+  workflow_dispatch: 
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下載程式碼
+        uses: actions/checkout@v3
+
+      - name: 安裝 Python 環境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 安裝必備套件
+        run: |
+          pip install -r requirements.txt
+
+      - name: 啟動狙擊機器人！
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+        run: |
+          python sniper_bot.py
