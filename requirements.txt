@@ -6,3 +6,4 @@ google-genai
 fugle-marketdata
 requests
 line-bot-sdk
+beautifulsoup4
