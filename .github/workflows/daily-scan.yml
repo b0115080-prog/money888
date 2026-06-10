@@ -33,8 +33,9 @@ jobs:
       - name: 啟動狙擊機器人！
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # ↓↓↓ 記得在 yml 檔裡加上這一行 ↓↓↓
+          GEMINI_API_KEY_BACKUP: ${{ secrets.GEMINI_API_KEY_BACKUP }}
           FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
-          # 必須是這兩行新的，不能再寫舊的 LINE_NOTIFY_TOKEN
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
         run: |
