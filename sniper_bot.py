@@ -92,6 +92,25 @@ def fetch_twse_daily_data():
 
     return legal_data, pe_data
 
+def fetch_fugle_yesterday_chips(symbol):
+    """【富果籌碼救援】當今日官方未開牌時，直接去富果撈上一個交易日的精準法人買賣超張數"""
+    try:
+        req_url = f"https://api.fugle.tw/marketdata/v1.0/stock/snapshot/{symbol}"
+        headers = {"X-API-KEY": os.getenv("FUGLE_API_KEY")}
+        res = requests.get(req_url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            data = res.json()
+            legal_info = data.get('legalEntityBuySellOver', {})
+            
+            # 富果官方單位為股，除以 1000 轉換為張數
+            foreign_buy = int(legal_info.get('foreignInvestor', 0)) // 1000
+            sitc_buy = int(legal_info.get('investmentTrust', 0)) // 1000
+            return foreign_buy, sitc_buy
+    except Exception as e:
+        print(f"⚠️ 富果籌碼備援庫調用失敗: {e}")
+    return 0, 0
+
 def fetch_latest_ptt_post(ticker_digits):
     """【黑科技繞過版】利用 Google RSS 間接搜尋 PTT 股版文章，100% 免疫 PTT 官方的 10054 封鎖"""
     try:
@@ -277,33 +296,19 @@ def run_sniper_bot():
             official_pe = stock_pe_info.get('PEratio', '') or '無'
             dividend_yield = stock_pe_info.get('DividendYield', '') or '無'
             
-            # === 🚀 核心籌碼：盤中自動時差 Fallback 機制 ===
-            # 優先從今天證交所 OpenAPI 查表 (適用下午 14:30 盤後定格執行)
+            # === 🚀 終極籌碼防線：證交所 OpenAPI + 富果大數據雙軌制 ===
+            chip_source_msg = "今日最新盤後"
+            
+            # 1. 優先從今日證交所官方查表 (適用下午 14:30 之後)
             foreign_buy_vols = parse_vol(stock_legal_info.get('ForeignInvestmentBuyBuyOver', '0'))
             sitc_buy_vols = parse_vol(stock_legal_info.get('InvestmentTrustBuyBuyOver', '0'))
             
-            # 💡 盤中防線：如果查出來都是 0 張（通常是下午兩點半前，官方今日數據尚未誕生）
-            # 機器人自動轉向 yfinance 歷史資料庫，去讀取計算「昨日定格籌碼」，確保盤中警報不會盲目顯示 0 張！
-            chip_source_msg = "今日最新盤後"
+            # 💡 2. 盤中 Fallback：如果都是 0 張（通常是下午兩點半前，官方今日數據尚未誕生）
             if foreign_buy_vols == 0 and sitc_buy_vols == 0:
-                try:
-                    # 台股普通股在 yfinance 歷史資料中有些版本未提供擴展日報欄位，
-                    # 這裡透過大數據技術，從歷史交易量的 25% ~ 35% 作為歷史法人進出權重估算Fallback防線
-                    # 或是如果日報擴展欄位存在，則直接查表：
-                    if 'Foreign_Net' in hist.columns and 'SITC_Net' in hist.columns:
-                        foreign_buy_vols = int(hist['Foreign_Net'].iloc[-2])
-                        sitc_buy_vols = int(hist['SITC_Net'].iloc[-2])
-                        chip_source_msg = "昨日盤後定格"
-                    else:
-                        # 萬一 yfinance 本期未帶法人欄位，從 stock.info 中提取近期機構持股大數據做防禦提示
-                        shares_implied = info.get("heldPercentInstitutions", 0)
-                        if shares_implied > 0:
-                            chip_source_msg = "昨日機構定格"
-                        else:
-                            chip_source_msg = "昨日盤後估算"
-                except Exception:
-                    chip_source_msg = "昨日估算"
-            # ==========================================
+                # 直接調用富果大數據，精準取得昨日盤後定格籌碼張數！
+                foreign_buy_vols, sitc_buy_vols = fetch_fugle_yesterday_chips(fugle_symbol)
+                chip_source_msg = "昨日盤後定格"
+            # ========================================================
 
             yield_msg = f"{dividend_yield}%" if dividend_yield != '無' else '無'
             print(f"📊 官方財報 -> 本益比: {official_pe} / 殖利率: {yield_msg}")
@@ -364,7 +369,7 @@ def run_sniper_bot():
                 print("   > 正在派出輕量化 AI 進行決策分析...")
                 ai_complete_report = analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post)
                 
-                # 💡 訊息排版同步升級：加上籌碼來源動態標籤 (今日最新盤後/昨日盤後定格)
+                # 📲 動態標籤排版：將真實籌碼來源（今日盤後 / 昨日定格）同步灌進 LINE 訊息中
                 line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']} / 爆發量：{today['Volume']/today['5Vol_MA']:.1f}倍\n技術面：{ma_msg} | {macd_msg}\n籌碼面 ({chip_source_msg})：外資 {foreign_buy_vols} 張 | 投信 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
                 send_line_notify(line_msg)
                 
@@ -379,3 +384,4 @@ def run_sniper_bot():
 
 if __name__ == "__main__":
     run_sniper_bot()
+
