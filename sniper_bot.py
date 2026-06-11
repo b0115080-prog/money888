@@ -163,4 +163,175 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
     【Dcard 股市版最新個股討論】
     {dcard_text}
     
-    請綜合上述精簡數據，精準研判
+    請綜合上述精簡數據，精準研判這是『實質利多真突破』還是『主力騙線陷阱』？
+    嚴格依照以下格式輸出繁體中文（不要包含任何 markdown 粗體符號 `**`）：
+    
+    🗣️ 網路社群輿情觀點：
+    - PTT 最新動向：(簡述PTT那則文章的態度與日期)
+    - Dcard 最新動向：(簡述Dcard那則文章的態度與日期)
+    - 散戶心理綜合研判：(一句話總結市場散戶是樂觀還是恐慌)
+    
+    🤖 AI 綜合判讀報告：
+    - 研判結論：(強勢買點 / 觀望 / 誘多陷阱 / 資訊不足)
+    - 綜合判斷原因：(100字內精簡總結)
+    - 潛在風險提示：(一句話警示)
+    """
+
+    for idx, strat in enumerate(strategies):
+        current_key = strat["key"]
+        model_name = strat["model"]
+        description = strat["desc"]
+        
+        try:
+            print(f"   > 🛡️ 正在嘗試防線 {idx+1}: {description}...")
+            client = genai.Client(api_key=current_key.strip())
+            response = client.models.generate_content(model=model_name, contents=prompt)
+            
+            if idx > 0: 
+                print(f"🔄 [交叉陣列救援成功] 成功透過【{description}】突襲通關，取得 AI 報告！")
+            return response.text
+            
+        except Exception as e:
+            error_str = str(e)
+            print(f"❌ 防線 {idx+1} ({model_name}) 宣告失守。")
+            
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                if idx < len(strategies) - 1:
+                    wait_time = 8.0  
+                    match = re.search(r"Please retry in ([\d\.]+)s", error_str)
+                    if match:
+                        wait_time = float(match.group(1)) + 1.5
+                    
+                    print(f"⏳ [矩陣避難] 主要管道撞牆。依據官方指示原地安全休眠 {wait_time:.2f} 秒...")
+                    time.sleep(wait_time)
+                    print(f"⚡ 緩衝期結束，立刻切換至下一道防線！")
+                    continue 
+                else:
+                    print("⚠️ 警告：已經耗盡所有交叉組合，後面已無防線。")
+            else:
+                if idx < len(strategies) - 1:
+                    print("⚠️ 遭遇非常規錯誤，立即無縫更換至下一套組合方案...")
+                    continue
+                
+    return "❌ 經過雙金鑰與雙模型的 4 輪矩陣交叉突襲，所有免費通道（含備用池）均已達上限，本次內文略過 AI 報告。"
+
+# --- 3.5 LINE 傳播模組 ---
+def send_line_notify(message):
+    """將文字訊息推播至 LINE Messaging API"""
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
+        print("⚠️ 未設定 LINE 金鑰，略過推播。")
+        return
+    try:
+        configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(PushMessageRequest(to=LINE_USER_ID, messages=[TextMessage(text=message)]))
+        print("📲 LINE 通知發送成功！")
+    except Exception as e:
+        print(f"⚠️ LINE 通知發送失敗: {e}")
+
+# --- 4. 核心掃描策略 ---
+def run_sniper_bot():
+    print("[主力狙擊機器人 - 雙軌即時旗艦版] 啟動！開始掃描...\n")
+    legal_data, pe_data = fetch_twse_daily_data()
+    
+    try:
+        fugle_client = RestClient(api_key=FUGLE_API_KEY)
+        fugle_stock = fugle_client.stock
+    except Exception as e:
+        print(f"富果 API 初始化失敗：{e}")
+        return
+
+    for ticker in target_tickers:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            company_name = info.get("shortName", ticker)
+            
+            hist = stock.history(period="6mo")
+            if hist.empty or len(hist) < 30:
+                print(f"- {company_name} ({ticker}) 歷史資料不足，跳過。")
+                continue
+                
+            fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '')
+            stock_pe_info = pe_data.get(fugle_symbol, {})
+            stock_legal_info = legal_data.get(fugle_symbol, {})
+
+            official_pe = stock_pe_info.get('PEratio', '') or '無'
+            dividend_yield = stock_pe_info.get('DividendYield', '') or '無'
+            foreign_buy_vols = parse_vol(stock_legal_info.get('ForeignInvestmentBuyBuyOver', '0'))
+            sitc_buy_vols = parse_vol(stock_legal_info.get('InvestmentTrustBuyBuyOver', '0'))
+
+            yield_msg = f"{dividend_yield}%" if dividend_yield != '無' else '無'
+            print(f"📊 官方財報 -> 本益比: {official_pe} / 殖利率: {yield_msg}")
+            print(f"🔥 法人籌碼 -> 外資買賣超: {foreign_buy_vols} 張 / 投信買賣超: {sitc_buy_vols} 張")
+            
+            try:
+                quote = fugle_stock.intraday.quote(symbol=fugle_symbol)
+                hist.iloc[-1, hist.columns.get_loc('Close')] = quote['lastPrice']
+                hist.iloc[-1, hist.columns.get_loc('Volume')] = quote['total']['tradeVolume']
+            except Exception as fugle_e:
+                print(f"⚠️ 無法取得 {ticker} 即時報價，使用延遲資料: {fugle_e}")
+
+            # 技術指標計算
+            hist['5MA'] = hist['Close'].rolling(window=5).mean()
+            hist['20MA'] = hist['Close'].rolling(window=20).mean()
+            hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
+            
+            delta = hist['Close'].diff()
+            up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
+            hist['RSI'] = 100 - (100 / (1 + (up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean())))
+            
+            exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
+            hist['MACD'] = exp1 - exp2
+            hist['Signal'] = hist['MACD'].ewm(span=9, adjust=False).mean()
+            
+            today, yesterday = hist.iloc[-1], hist.iloc[-2]
+            
+            # 訊號邏輯
+            golden_cross = (yesterday['5MA'] <= yesterday['20MA']) and (today['5MA'] > today['20MA'])
+            macd_reversal = (yesterday['MACD'] <= yesterday['Signal']) and (today['MACD'] > today['Signal'])
+            volume_surge = today['Volume'] > (today['5Vol_MA'] * 2)
+            bullish_alignment = (today['Close'] > today['5MA']) and (today['5MA'] > today['20MA'])
+            strong_surge = today['Close'] >= (yesterday['Close'] * 1.04)
+            momentum_breakout = bullish_alignment and strong_surge
+            
+            ma_msg = "黃金交叉！" if golden_cross else ("多頭強勢排列！" if bullish_alignment else "無明顯交會")
+            macd_msg = "底部反轉！" if macd_reversal else ("MACD紅柱維持" if today['MACD'] > today['Signal'] else "柱狀圖正常")
+            vol_msg = f"爆發量！({today['Volume']/today['5Vol_MA']:.1f}倍)" if volume_surge else "量能平穩"
+            
+            tech_info = {
+                "rsi": today['RSI'], "ma_signal": ma_msg, "macd_signal": macd_msg, "vol_signal": vol_msg,
+                "pe": official_pe if official_pe != '無' else info.get("trailingPE", "無資料"),
+                "foreign_buy": foreign_buy_vols, "sitc_buy": sitc_buy_vols, "dividend_yield": dividend_yield
+            }
+            
+            if golden_cross or macd_reversal or volume_surge or momentum_breakout: 
+                print(f"\n[發現獵物] {company_name} ({ticker}) 觸發警報！")
+                ticker_digits = ticker.replace('.TW', '').replace('.TWO', '')
+                
+                print("   > 正在精準抓取 Yahoo/Google 各 3 則新聞...")
+                yahoo_news, google_news = fetch_stock_news_v2(ticker, company_name)
+                print("   > 正在搜尋 PTT 股版最新 1 則討論與日期...")
+                ptt_post = fetch_latest_ptt_post(ticker_digits)
+                print("   > 正在搜尋 Dcard 股市版最新 1 則討論與日期...")
+                dcard_post = fetch_latest_dcard_post(ticker_digits)
+                
+                print("   > 正在派出輕量化 AI 進行決策分析...")
+                ai_complete_report = analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post)
+                
+                line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']} / 爆發量：{today['Volume']/today['5Vol_MA']:.1f}倍\n技術面：{ma_msg} | {macd_msg}\n籌碼面：外資 {foreign_buy_vols} 張 | 投信 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
+                send_line_notify(line_msg)
+                
+                print("   > [防禦機制] 進入 15 秒冷卻緩衝區...")
+                time.sleep(15)
+            else:
+                print(f"- {company_name} ({ticker}) 目前即時指標平淡 ({today['Close']})，繼續潛伏。")
+                
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"X 處理 {ticker} 時發生錯誤: {e}")
+
+if __name__ == "__main__":
+    run_sniper_bot()
