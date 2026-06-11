@@ -7,3 +7,4 @@ fugle-marketdata
 requests
 line-bot-sdk
 beautifulsoup4
+streamlit
