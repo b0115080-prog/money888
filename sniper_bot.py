@@ -93,9 +93,10 @@ def fetch_twse_daily_data():
     return legal_data, pe_data
 
 def fetch_fugle_yesterday_chips(symbol):
-    """【富果籌碼救援】當今日官方未開牌時，直接去富果撈上一個交易日的精準法人買賣超張數"""
+    """【富果籌碼救援】修正 stocks 複數網址，100% 精準撈出上一個交易日的法人買賣超張數"""
     try:
-        req_url = f"https://api.fugle.tw/marketdata/v1.0/stock/snapshot/{symbol}"
+        # 🚀 關鍵修正：將 stock 改為官方規定的 stocks (複數)
+        req_url = f"https://api.fugle.tw/marketdata/v1.0/stocks/snapshot/{symbol}"
         headers = {"X-API-KEY": os.getenv("FUGLE_API_KEY")}
         res = requests.get(req_url, headers=headers, timeout=5)
         
@@ -107,8 +108,10 @@ def fetch_fugle_yesterday_chips(symbol):
             foreign_buy = int(legal_info.get('foreignInvestor', 0)) // 1000
             sitc_buy = int(legal_info.get('investmentTrust', 0)) // 1000
             return foreign_buy, sitc_buy
+        else:
+            print(f"⚠️ 富果 API 響應異常，狀態碼: {res.status_code}，請檢查 FUGLE_API_KEY 是否正確設定。")
     except Exception as e:
-        print(f"⚠️ 富果籌碼備援庫調用失敗: {e}")
+        print(f"⚠️ 富果籌碼備援庫調用遭遇致命錯誤: {e}")
     return 0, 0
 
 def fetch_latest_ptt_post(ticker_digits):
