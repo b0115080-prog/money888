@@ -2,14 +2,20 @@ name: 台股主力狙擊機器人
 
 on:
   schedule:
-    # 1. 台灣時間 上午 09:30 (盤中第一次掃描)
+    # 1. 台灣時間 上午 08:30 (盤前定錨：關注前一天收盤與社群狀況)
+    - cron: '30 0 * * 1-5'
+    
+    # 2. 台灣時間 上午 09:30 (早盤強勢動能確立)
     - cron: '30 1 * * 1-5'
     
-    # 2. 台灣時間 上午 11:30 (盤中第二次掃描)
-    - cron: '30 3 * * 1-5'
+    # 3. 台灣時間 上午 10:45 (盤中洗盤、主力轉折)
+    - cron: '45 2 * * 1-5'
     
-    # 3. 台灣時間 下午 13:00 (收盤前最後突襲)
-    - cron: '00 5 * * 1-5'
+    # 4. 台灣時間 中午 12:00 (午盤多空拉鋸、尋找潛伏股)
+    - cron: '00 4 * * 1-5'
+    
+    # 5. 台灣時間 下午 13:15 (收盤前最後突襲：鎖定尾盤強勢標的)
+    - cron: '15 5 * * 1-5'
   
   # 保持手動執行功能
   workflow_dispatch: 
@@ -33,7 +39,6 @@ jobs:
       - name: 啟動狙擊機器人！
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # ↓↓↓ 記得在 yml 檔裡加上這一行 ↓↓↓
           GEMINI_API_KEY_BACKUP: ${{ secrets.GEMINI_API_KEY_BACKUP }}
           FUGLE_API_KEY: ${{ secrets.FUGLE_API_KEY }}
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
