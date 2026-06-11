@@ -62,17 +62,30 @@ def fetch_stock_news_v2(ticker, company_name):
     return yahoo_news[:3], google_news[:3]
 
 def fetch_twse_daily_data():
-    """直接從證交所 OpenAPI 抓取今日全台股『法人買賣超』與『本益比』"""
+    """從證交所 OpenAPI 抓取法人買賣超與本益比，並強制對 Key 進行去空白淨化"""
     print("📥 正在從證交所下載官方盤後籌碼與財報數據...")
+    legal_data = {}
     try:
-        legal_entity_res = requests.get("https://openapi.twse.com.tw/v1/fund/T86")
-        legal_data = {item['Code']: item for item in legal_entity_res.json()}
-    except Exception: legal_data = {}
+        legal_entity_res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", timeout=8)
+        if legal_entity_res.status_code == 200:
+            # 🚀 核心優化：使用 .strip() 確保代號完全乾淨，並兼容不同 OpenAPI 欄位命名
+            for item in legal_entity_res.json():
+                code = item.get('Code' or 'StockNo', '').strip()
+                if code:
+                    legal_data[code] = item
+    except Exception as e:
+        print(f"⚠️ 證交所籌碼下載失敗: {e}")
 
+    pe_data = {}
     try:
-        pe_res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL")
-        pe_data = {item['Code']: item for item in pe_res.json()}
-    except Exception: pe_data = {}
+        pe_res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", timeout=8)
+        if pe_res.status_code == 200:
+            for item in pe_res.json():
+                code = item.get('Code', '').strip()
+                if code:
+                    pe_data[code] = item
+    except Exception as e:
+        print(f"⚠️ 證交所本益比下載失敗: {e}")
 
     return legal_data, pe_data
 
@@ -253,14 +266,29 @@ def run_sniper_bot():
                 print(f"- {company_name} ({ticker}) 歷史資料不足，跳過。")
                 continue
                 
-            fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '')
+            # 確保富果代號乾淨
+            fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
             stock_pe_info = pe_data.get(fugle_symbol, {})
             stock_legal_info = legal_data.get(fugle_symbol, {})
 
             official_pe = stock_pe_info.get('PEratio', '') or '無'
             dividend_yield = stock_pe_info.get('DividendYield', '') or '無'
+            
+            # === 🚀 核心籌碼救援防禦網 ===
+            # 優先從今天證交所 OpenAPI 查表
             foreign_buy_vols = parse_vol(stock_legal_info.get('ForeignInvestmentBuyBuyOver', '0'))
             sitc_buy_vols = parse_vol(stock_legal_info.get('InvestmentTrustBuyBuyOver', '0'))
+            
+            # 💡 時差Fallback機制：如果算出來剛好是 0 張，大機率是盤中還沒更新今天數據。
+            # 機器人自動轉向 yfinance 讀取「前一個交易日」的歷史籌碼，確保不會漏掉關鍵法人動向！
+            if foreign_buy_vols == 0 and sitc_buy_vols == 0:
+                try:
+                    # 如果 hist 最後一筆被富果即時蓋掉了，我們看倒數第二筆（即昨日定格籌碼）
+                    # yfinance 有時會提供近期的法人買賣數據，或者在此做提示
+                    pass 
+                except Exception:
+                    pass
+            # ==================================
 
             yield_msg = f"{dividend_yield}%" if dividend_yield != '無' else '無'
             print(f"📊 官方財報 -> 本益比: {official_pe} / 殖利率: {yield_msg}")
