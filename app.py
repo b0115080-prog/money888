@@ -67,21 +67,7 @@ if st.sidebar.button("🚀 強迫 GitHub 核心立即突擊", use_container_widt
     except Exception as e:
         st.sidebar.error("❌ 連線異常，請稍後再試。")
 
-st.sidebar.write("---")
-st.sidebar.subheader("📢 通知控制防線")
-
-# 2. 暫停今日通知按鈕 (✅ 已修正縮排，絕對不會拖慢網頁速度)
-if st.sidebar.button("🛑 暫停今日通知 (太震盪不想看)", use_container_width=True):
-    # 🚨 請把下方引號內的網址，換成你 Google Apps Script 部署出來的 /exec 網址！
-    gas_webhook_url = "https://script.google.com/macros/s/AKfycbyuNCC0eGIwbiAloU0wTsXSCV-RNhzFlGPrdnQ0wdBOJagGt6GGFuatciCl4Ui03ne-/exec"
-    
-    try:
-        # 這裡有嚴格向內縮排，所以網頁重新整理時絕對不會卡住
-        res = requests.post(gas_webhook_url, data={"action": "pause"}, timeout=5)
-        st.sidebar.error("🛑 今日已成功熔斷！機器人今天盤中將保持絕對安靜。")
-        st.sidebar.caption("💡 備註：明天早盤 08:30 系統會自動重啟狩獵。")
-    except Exception as e:
-        st.sidebar.warning("連線超時，請檢查網址或直接去試算表 B1 打上 PAUSE。")
+# (已移除暫停通知按鈕，保持介面極簡)
 
 # ==========================================
 # --- 4. 運算核心開始 ---
@@ -91,7 +77,7 @@ legal_data, pe_data = fetch_twse_data()
 
 summary_rows = []
 
-with st.spinner("🔄 正在跨海同步 Yahoo 歷史資料與富果即時行情..."):
+with st.spinner("🔄 正在跨海同步 Yahoo 歷史資料、技術指標與富果即時行情..."):
     for ticker in tickers:
         try:
             stock = yf.Ticker(ticker)
@@ -100,14 +86,34 @@ with st.spinner("🔄 正在跨海同步 Yahoo 歷史資料與富果即時行情
             
             fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
             
-            # 計算技術指標
+            # --- 基礎均線與量能計算 ---
             hist['5MA'] = hist['Close'].rolling(window=5).mean()
             hist['20MA'] = hist['Close'].rolling(window=20).mean()
             hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
             
+            # --- 🚀 新增：RSI (14日) 計算 ---
+            delta = hist['Close'].diff()
+            up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
+            hist['RSI'] = 100 - (100 / (1 + (up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean())))
+            
+            # --- 🚀 新增：MACD 計算 ---
+            exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
+            hist['MACD'] = exp1 - exp2
+            hist['Signal'] = hist['MACD'].ewm(span=9, adjust=False).mean()
+            hist['MACD_Hist'] = hist['MACD'] - hist['Signal'] # 柱狀圖
+            
+            # --- 🚀 新增：KD (9日) 計算 ---
+            low_min = hist['Low'].rolling(window=9).min()
+            high_max = hist['High'].rolling(window=9).max()
+            hist['RSV'] = 100 * ((hist['Close'] - low_min) / (high_max - low_min))
+            hist['K'] = hist['RSV'].ewm(com=2, adjust=False).mean() # 平滑近似值
+            hist['D'] = hist['K'].ewm(com=2, adjust=False).mean()
+
+            # 抓取今日與昨日數值
             today, yesterday = hist.iloc[-1], hist.iloc[-2]
             
-            # 昨日定格籌碼救援防線
+            # --- 籌碼邏輯 ---
             stock_legal = legal_data.get(fugle_symbol, {})
             try:
                 foreign_buy = int(stock_legal.get('ForeignInvestmentBuyBuyOver', '0').replace(',', '')) // 1000
@@ -118,24 +124,45 @@ with st.spinner("🔄 正在跨海同步 Yahoo 歷史資料與富果即時行情
                 sitc_buy = int(hist['SITC_Net'].iloc[-2]) // 1000 if 'SITC_Net' in hist.columns else int((yesterday['Volume'] // 1000) * 0.03)
                 chip_source = "昨日估算"
 
-            # 運算即時亮點與狀態
+            # --- 綜合狀態與技術指標研判 ---
+            # 1. 均線與爆量狀態
             status_signal = "🟢 正常監控"
             if today['Close'] > today['5MA'] and today['5MA'] > today['20MA'] and today['Volume'] > (today['5Vol_MA'] * 1.5):
                 status_signal = "🔥 爆量真突破"
             elif today['Close'] < today['5MA']:
                 status_signal = "🟡 跌破5MA觀望"
 
+            # 2. MACD 狀態判讀
+            if yesterday['MACD_Hist'] < 0 and today['MACD_Hist'] > 0:
+                macd_status = "🔥 底部反轉"
+            elif today['MACD_Hist'] > 0:
+                macd_status = "🟢 柱狀圖正常"
+            elif today['MACD_Hist'] < 0 and today['MACD_Hist'] > yesterday['MACD_Hist']:
+                macd_status = "🟡 負柱收斂"
+            else:
+                macd_status = "🔴 偏空下探"
+
+            # 3. KD 狀態判讀
+            if yesterday['K'] <= yesterday['D'] and today['K'] > today['D']:
+                kd_status = "🔥 黃金交叉"
+            elif today['K'] > today['D']:
+                kd_status = "🟢 K>D"
+            else:
+                kd_status = "🔴 K<D"
+
+            # 將所有數據寫入表格列
             summary_rows.append({
                 "股票代號": ticker,
                 "公司名稱": stock.info.get("shortName", ticker),
                 "即時股價": round(today['Close'], 2),
-                "當日成交量(張)": int(today['Volume'] // 1000),
+                "當日量(張)": int(today['Volume'] // 1000),
                 "5日均量(張)": int(today['5Vol_MA'] // 1000),
-                "外資籌碼(張)": foreign_buy,
-                "投信籌碼(張)": sitc_buy,
+                "RSI(14日)": round(today['RSI'], 1),
+                "KD訊號": kd_status,
+                "MACD訊號": macd_status,
+                "外資(張)": foreign_buy,
+                "投信(張)": sitc_buy,
                 "籌碼來源": chip_source,
-                "本益比": pe_data.get(fugle_symbol, {}).get('PEratio', '無'),
-                "殖利率": pe_data.get(fugle_symbol, {}).get('DividendYield', '無'),
                 "即時狀態": status_signal
             })
         except Exception as e:
@@ -149,14 +176,14 @@ if not df_display.empty:
     col1, col2, col3 = st.columns(3)
     col1.metric("📊 總監控標的", f"{len(df_display)} 檔")
     col2.metric("🔥 盤中強勢突破", f"{len(df_display[df_display['即時狀態'] == '🔥 爆量真突破'])} 檔")
-    col3.metric("🟢 正常潛伏標的", f"{len(df_display[df_display['即時狀態'] == '🟢 正常監控'])} 檔")
+    col3.metric("📈 KD黃金交叉", f"{len(df_display[df_display['KD訊號'] == '🔥 黃金交叉'])} 檔")
     
     st.write("---")
     # 高清互動式大表格
     st.dataframe(
         df_display.style.map(
-            lambda v: 'background-color: #ff4b4b; color: white;' if v == "🔥 爆量真突破" else ('background-color: #262730; color: #a3a8b4;' if v == "🟡 跌破5MA觀望" else ''),
-            subset=['即時狀態']
+            lambda v: 'background-color: #ff4b4b; color: white;' if v in ["🔥 爆量真突破", "🔥 黃金交叉", "🔥 底部反轉"] else ('background-color: #262730; color: #a3a8b4;' if v in ["🟡 跌破5MA觀望", "🔴 偏空下探", "🔴 K<D"] else ''),
+            subset=['即時狀態', 'KD訊號', 'MACD訊號']
         ),
         use_container_width=True,
         hide_index=True
