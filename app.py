@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 st.set_page_config(page_title="台股主力狙擊指揮所", page_icon="🎯", layout="wide")
 load_dotenv()
 
-# --- 2. 核心數據抓取函式 (與你的機器人邏輯完美對齊) ---
+# --- 2. 核心數據抓取函式 ---
 @st.cache_data(ttl=60) # 🚀 快取機制：60秒內重複刷網頁不重複呼叫API，省流量又安全
 def get_clean_tickers():
     """抓取並淨化 Google 試算表追蹤清單"""
@@ -45,21 +45,47 @@ def fetch_twse_data():
 st.title("🎯 台股主力狙擊大本營")
 st.subheader("隨時監控即時行情、技術面均線與昨日法人核心籌碼")
 
-# 右上角手動強迫 GitHub 執行按鈕
+# ==========================================
+# 🚀 側邊欄控制中心 (按鈕區)
+# ==========================================
+
+# 1. 強迫 GitHub 執行按鈕
 if st.sidebar.button("🚀 強迫 GitHub 核心立即突擊", use_container_width=True):
     st.sidebar.info("📡 正在向 GitHub 發射最高特權 204 暗號...")
-    # 這裡可以直接調用你先前在 Google GAS 寫的 Webhook 邏輯
     owner, repo = "b0115080-prog", "money888"
-    token = os.getenv("GITHUB_TOKEN", "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")
+    # 從 Secrets 讀取金鑰，若無則抓取預設值
+    token = os.getenv("GITHUB_TOKEN")
     dispatch_url = f"https://api.github.com/repos/{owner}/{repo}/dispatches"
-    res = requests.post(dispatch_url, json={"event_type": "google_track_trigger"}, 
-                        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"})
-    if res.status_code == 204:
-        st.sidebar.success("✅ GitHub 已經插隊開機！請靜待 45 秒查看 LINE 通知。")
-    else:
-        st.sidebar.error(f"❌ 呼叫失敗，狀態碼: {res.status_code}")
+    
+    try:
+        res = requests.post(dispatch_url, json={"event_type": "google_track_trigger"}, 
+                            headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}, timeout=5)
+        if res.status_code == 204:
+            st.sidebar.success("✅ GitHub 已經插隊開機！請靜待 45 秒查看 LINE 通知。")
+        else:
+            st.sidebar.error(f"❌ 呼叫失敗，狀態碼: {res.status_code}")
+    except Exception as e:
+        st.sidebar.error("❌ 連線異常，請稍後再試。")
 
+st.sidebar.write("---")
+st.sidebar.subheader("📢 通知控制防線")
+
+# 2. 暫停今日通知按鈕 (✅ 已修正縮排，絕對不會拖慢網頁速度)
+if st.sidebar.button("🛑 暫停今日通知 (太震盪不想看)", use_container_width=True):
+    # 🚨 請把下方引號內的網址，換成你 Google Apps Script 部署出來的 /exec 網址！
+    gas_webhook_url = "https://script.google.com/macros/s/AKfycbyuNCC0eGIwbiAloU0wTsXSCV-RNhzFlGPrdnQ0wdBOJagGt6GGFuatciCl4Ui03ne-/exec"
+    
+    try:
+        # 這裡有嚴格向內縮排，所以網頁重新整理時絕對不會卡住
+        res = requests.post(gas_webhook_url, data={"action": "pause"}, timeout=5)
+        st.sidebar.error("🛑 今日已成功熔斷！機器人今天盤中將保持絕對安靜。")
+        st.sidebar.caption("💡 備註：明天早盤 08:30 系統會自動重啟狩獵。")
+    except Exception as e:
+        st.sidebar.warning("連線超時，請檢查網址或直接去試算表 B1 打上 PAUSE。")
+
+# ==========================================
 # --- 4. 運算核心開始 ---
+# ==========================================
 tickers = get_clean_tickers()
 legal_data, pe_data = fetch_twse_data()
 
@@ -81,7 +107,7 @@ with st.spinner("🔄 正在跨海同步 Yahoo 歷史資料與富果即時行情
             
             today, yesterday = hist.iloc[-1], hist.iloc[-2]
             
-            # 昨日定格籌碼救援防線 (與 sniper_bot 完美對齊)
+            # 昨日定格籌碼救援防線
             stock_legal = legal_data.get(fugle_symbol, {})
             try:
                 foreign_buy = int(stock_legal.get('ForeignInvestmentBuyBuyOver', '0').replace(',', '')) // 1000
