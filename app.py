@@ -11,17 +11,18 @@ st.set_page_config(page_title="台股主力狙擊指揮所", page_icon="🎯", l
 load_dotenv()
 
 # --- 2. 核心數據抓取函式 ---
-@st.cache_data(ttl=60) # 🚀 快取機制：60秒內重複刷網頁不重複呼叫API，省流量又安全
+@st.cache_data(ttl=60) 
 def get_clean_tickers():
     """抓取並淨化 Google 試算表追蹤清單"""
     try:
         url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQz7MmTCJQAkMs8qpyLtpQOuZF4LpW3f3or51CH0USOIFLgEATnjUcX4lP6JfKl7RPTciy4-cEDPYmg/pub?output=csv"
         df = pd.read_csv(url, header=None)
+        df = df.dropna(subset=[0])
         df[0] = df[0].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip()
-        return [t for t in df[0].dropna().tolist() if t and t.strip()]
+        raw_tickers = [t for t in df[0].tolist() if t.lower() != 'nan' and t]
+        return list(dict.fromkeys(raw_tickers)) # 回傳去重複的乾淨清單
     except:
         return ["0050.TW", "0052.TW"]
-
 def fetch_twse_data():
     """抓取證交所官方財報與籌碼"""
     legal_data, pe_data = {}, {}
