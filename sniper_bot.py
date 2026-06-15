@@ -36,9 +36,17 @@ try:
     SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQz7MmTCJQAkMs8qpyLtpQOuZF4LpW3f3or51CH0USOIFLgEATnjUcX4lP6JfKl7RPTciy4-cEDPYmg/pub?output=csv"
     df_tickers = pd.read_csv(SHEET_CSV_URL, header=None) 
     
-    # 🚀 核心防禦：強制洗掉從網頁複製時可能夾帶的 \u200b 等看不見的隱形幽靈字元雜訊
+    # 🚀 防禦一：先砍掉真實的數學空值
+    df_tickers = df_tickers.dropna(subset=[0])
+    
+    # 🚀 防禦二：淨化隱形字元
     df_tickers[0] = df_tickers[0].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip()
-    target_tickers = [t for t in df_tickers[0].dropna().tolist() if t and t.strip()]
+    
+    # 🚀 防禦三：嚴格排除字串 'nan'
+    raw_tickers = [t for t in df_tickers[0].tolist() if t.lower() != 'nan' and t]
+    
+    # 🚀 防禦四：強制去除重複標的！(即使試算表不小心重複輸入，也只會通知一次)
+    target_tickers = list(dict.fromkeys(raw_tickers))
     
     print(f"✅ 成功從雲端讀取並全面淨化 {len(target_tickers)} 檔追蹤標的！")
 except Exception as e:
