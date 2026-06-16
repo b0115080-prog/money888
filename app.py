@@ -37,20 +37,32 @@ def get_clean_tickers():
         st.error(f"❌ 讀取試算表失敗: {e}")
         return ["0050.TW", "0052.TW"]
 
-# 🚀 【正名天網】直接從證交所官方獲取 100% 準確的繁體中文股票名稱對照表
+# 🚀 修正：將 fetch_stock_names_map 改為包含 ETF 清單的超級映射表
 @st.cache_data(ttl=86400)
 def fetch_stock_names_map():
     name_map = {}
+    # 個股清單
     try:
         res = GLOBAL_SESSION.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", timeout=5)
         if res.status_code == 200:
             for item in res.json():
                 code = item.get('Code', '').strip()
                 name = item.get('Name', '').strip()
-                if code and name:
-                    name_map[code] = name
+                if code and name: name_map[code] = name
+    except: pass
+    # ETF 清單 (補全 0050, 0052 等名稱)
+    try:
+        res = GLOBAL_SESSION.get("https://openapi.twse.com.tw/v1/fund/ETFIOP", timeout=5)
+        if res.status_code == 200:
+            for item in res.json():
+                code = item.get('InstrumentID', '').strip()
+                name = item.get('InstrumentName', '').strip()
+                if code and name: name_map[code] = name
     except: pass
     return name_map
+
+# 在 generate_dashboard_data 中，將名稱抓取改為：
+# company_name = names_map.get(fugle_symbol, ticker)
 
 @st.cache_data(ttl=300)
 def fetch_market_daily_data(tickers_list):
