@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 st.set_page_config(page_title="領航員風向觀測站", page_icon="🎯", layout="wide")
 load_dotenv()
 
-# 全域高效率 Session 連線池
+# --- 🚀 全域 Session 連線池管理 ---
 GLOBAL_SESSION = requests.Session()
 GLOBAL_SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -25,6 +25,7 @@ def safe_val(val, default=0):
 
 @st.cache_data(ttl=60)
 def get_clean_tickers():
+    """抓取並淨化 Google 試算表追蹤清單 (防呆去重)"""
     try:
         url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQz7MmTCJQAkMs8qpyLtpQOuZF4LpW3f3or51CH0USOIFLgEATnjUcX4lP6JfKl7RPTciy4-cEDPYmg/pub?output=csv"
         df = pd.read_csv(url, header=None)
@@ -32,73 +33,18 @@ def get_clean_tickers():
         df[0] = df[0].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip()
         raw_tickers = [t for t in df[0].tolist() if t.lower() != 'nan' and t]
         return list(dict.fromkeys(raw_tickers))
-    except: return ["0050.TW", "0052.TW"]
-
-# 🚀 核心優化：引入中英雙語精準去重特定日期抓取模組
-def fetch_finmind_chips_for_date(session, ticker_digits, target_date):
-    try:
-        url = "https://api.finmindtrade.com/api/v4/data"
-        params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": str(ticker_digits), "start_date": target_date, "end_date": target_date}
-        res = session.get(url, params=params, timeout=5)
-        data = res.json()
-        if data.get("msg") == "success" and len(data.get("data", [])) > 0:
-            df = pd.DataFrame(data["data"])
-            if df.empty: return 0, 0, f"FinMind({target_date[5:].replace('-', '/')})"
-            if df['name'].str.contains('Foreign_Investor').any():
-                f_df = df[df['name'] == 'Foreign_Investor']
-                fd_df = df[df['name'] == 'Foreign_Dealer']
-                s_df = df[df['name'] == 'Investment_Trust']
-            else:
-                f_df = df[df['name'] == '外資']
-                fd_df = df[df['name'] == '外資自營商']
-                s_df = df[df['name'] == '投信']
-            foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
-            fd_buy = (fd_df['buy'].sum() - fd_df['sell'].sum()) // 1000
-            total_foreign = foreign_buy + fd_buy
-            sitc_buy = (s_df['buy'].sum() - s_df['sell'].sum()) // 1000
-            return int(total_foreign), int(sitc_buy), f"FinMind({target_date[5:].replace('-', '/')})"
-    except: pass
-    return "未取得", "未取得", "⚠️ 查無資料"
-
-def fetch_finmind_chips_fallback(session, ticker_digits):
-    try:
-        tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-        start_date = (tw_now - datetime.timedelta(days=15)).strftime("%Y-%m-%d")
-        url = "https://api.finmindtrade.com/api/v4/data"
-        params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": str(ticker_digits), "start_date": start_date}
-        res = session.get(url, params=params, timeout=5)
-        data = res.json()
-        if data.get("msg") == "success" and len(data.get("data", [])) > 0:
-            df = pd.DataFrame(data["data"])
-            dates = sorted(df['date'].unique(), reverse=True)
-            for date in dates:
-                df_date = df[df['date'] == date]
-                if df_date['name'].str.contains('Foreign_Investor').any():
-                    f_df = df_date[df_date['name'] == 'Foreign_Investor']
-                    fd_df = df_date[df_date['name'] == 'Foreign_Dealer']
-                    s_df = df_date[df_date['name'] == 'Investment_Trust']
-                else:
-                    f_df = df_date[df_date['name'] == '外資']
-                    fd_df = df_date[df_date['name'] == '外資自營商']
-                    s_df = df_date[df_date['name'] == '投信']
-                foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
-                fd_buy = (fd_df['buy'].sum() - fd_df['sell'].sum()) // 1000
-                total_foreign = foreign_buy + fd_buy
-                sitc_buy = (s_df['buy'].sum() - s_df['sell'].sum()) // 1000
-                if total_foreign != 0 or sitc_buy != 0:
-                    return int(total_foreign), int(sitc_buy), f"FinMind歷史({date[5:].replace('-', '/')})"
-            return 0, 0, f"FinMind歷史({dates[0][5:].replace('-', '/')})"
-    except: pass
-    return "未取得", "未取得", "⚠️ 查無資料"
+    except Exception as e:
+        st.error(f"❌ 讀取試算表失敗: {e}")
+        return ["0050.TW", "0052.TW"]
 
 @st.cache_data(ttl=300)
-def fetch_market_daily_data(tickers_tuple):
-    """🚀 終極重構：日期最優先決策矩陣！當日官方失敗，立刻逼迫 FinMind 備援同日資料，絕不盲目滑坡"""
+def fetch_market_daily_data():
+    """🚀 【日期優先交叉天網核心】: 遇到 OpenAPI 空窗或失敗，在同一個日期內立刻逼迫 FinMind 備援，絕不盲目跨日滑坡"""
     legal_data = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
-    # 1. 先測試當日上市 OpenAPI
+    # 🟢 第一階：先測試最新當日上市 OpenAPI (限制重試 2 次)
     for _ in range(2):
         try:
             res = GLOBAL_SESSION.get("https://openapi.twse.com.tw/v1/fund/T86", timeout=5)
@@ -112,23 +58,23 @@ def fetch_market_daily_data(tickers_tuple):
                 return legal_data
         except: time.sleep(0.5)
 
-    # 2. 核心大腦：日期優先迴圈，逐日進行跨庫夾擊
-    for i in range(1, 6):
+    # 🔴 第二階 【日期優先交織防線】：逐日往回推算，同日內跨庫強攻
+    for i in range(1, 7):
         dt = tw_now - datetime.timedelta(days=i)
-        if dt.weekday() >= 5: continue
+        if dt.weekday() >= 5: continue # 跳過週末休市
         date_str = dt.strftime("%Y%m%d")
         target_date_fm = dt.strftime("%Y-%m-%d")
         display_date = dt.strftime("%m/%d")
-
-        # 戰術 A：嘗試敲擊官方歷史網頁
-        day_success = False
+        
+        official_success = False
+        # 戰術 A：嘗試強攻證交所官方網頁歷史資料庫
         for _ in range(2):
             try:
-                res = GLOBAL_SESSION.get(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL", timeout=5)
+                res = GLOBAL_SESSION.get(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL", headers=headers, timeout=5)
                 data = res.json()
                 if data.get('stat') == 'OK' and data.get('data'):
                     fields = data['fields']
-                    f_idx = next((idx for idx, f in enumerate(fields) if '外陸資買賣超股數' in f or '外資及陸資買賣超股數' in f), -1)
+                    f_idx = next((idx for idx, f in enumerate(fields) if '外陸資買賣超股數局' in f or '外資及陸資買賣超股數' in f or '外陸資買賣超股數(不含外資自營商)' in f), -1)
                     fd_idx = next((idx for idx, f in enumerate(fields) if '外資自營商買賣超股數' in f), -1)
                     s_idx = next((idx for idx, f in enumerate(fields) if '投信買賣超股數' in f), -1)
                     for row in data['data']:
@@ -137,25 +83,43 @@ def fetch_market_daily_data(tickers_tuple):
                         if fd_idx != -1: f_buy += int(row[fd_idx].replace(',', ''))
                         s_buy = int(row[s_idx].replace(',', '')) if s_idx != -1 else 0
                         legal_data[code] = {'foreign': str(f_buy), 'sitc': str(s_buy), 'source': f'官方歷史({display_date})'}
-                    day_success = True
+                    official_success = True
                     break
             except: time.sleep(0.5)
+            
+        if official_success and len(legal_data) > 0:
+            return legal_data
+            
+        # 🚀 戰術 B 【同日 FinMind 攔截機制】：若官方網頁當下連線失敗，絕對不准滑坡到下一天！立刻同日呼叫全市場備援
+        try:
+            url = "https://api.finmindtrade.com/api/v4/data"
+            params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "start_date": target_date_fm, "end_date": target_date_fm}
+            res = GLOBAL_SESSION.get(url, params=params, timeout=5)
+            fm_json = res.json()
+            if fm_json.get("msg") == "success" and len(fm_json.get("data", [])) > 0:
+                df = pd.DataFrame(fm_json["data"])
+                has_english = df['name'].str.contains('Foreign_Investor').any()
+                
+                # 矩陣式一次打包當日全市場籌碼
+                for stock_id, sub_df in df.groupby('stock_id'):
+                    if has_english:
+                        f_df = sub_df[sub_df['name'].isin(['Foreign_Investor', 'Foreign_Dealer'])]
+                        s_df = sub_df[sub_df['name'] == 'Investment_Trust']
+                    else:
+                        f_df = sub_df[sub_df['name'].isin(['外資', '外資自營商'])]
+                        s_df = sub_df[sub_df['name'] == '投信']
+                        
+                    f_net = f_df['buy'].sum() - f_df['sell'].sum()
+                    s_net = s_df['buy'].sum() - s_df['sell'].sum()
+                    
+                    legal_data[str(stock_id).strip()] = {
+                        'foreign': str(f_net),
+                        'sitc': str(s_net),
+                        'source': f'FinMind({display_date})'
+                    }
+                return legal_data
+        except: pass
         
-        if day_success: return legal_data
-
-        # 🚀 戰術 B [核心Bug修復點]：如果官方 06/15 失敗，不准跳到 06/12！立刻呼叫 FinMind 攔截 06/15 的籌碼！
-        if tickers_tuple:
-            benchmark = tickers_tuple[0].replace('.TW', '').replace('.TWO', '').strip()
-            try:
-                url = "https://api.finmindtrade.com/api/v4/data"
-                params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": benchmark, "start_date": target_date_fm, "end_date": target_date_fm}
-                res = GLOBAL_SESSION.get(url, params=params, timeout=4)
-                fm_json = res.json()
-                if fm_json.get("msg") == "success" and len(fm_json.get("data", [])) > 0:
-                    # 抓到了！FinMind 在這一天有真實交易數據，發射信號鎖定此日期，不准再往下回溯！
-                    return {"__USE_FINMIND__": True, "__TARGET_DATE__": target_date_fm}
-            except: pass
-
     return {}
 
 @st.cache_data(ttl=86400)
@@ -167,18 +131,44 @@ def get_company_name_cached(ticker_digits, api_key):
     except: pass
     return ticker_digits
 
-@st.cache_data(ttl=60, show_spinner=False)
-def generate_dashboard_data(tickers, legal_data, fugle_api_key):
-    summary_rows = []
-    errors = []
-    session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+# --- 2. 側邊欄控制中心 (使用 with 語法強制錨定，確保按鈕永不消失) ---
+with st.sidebar:
+    st.write("### 🧭 控制大本營")
+    if st.button("舉 🧹 清除網頁快取 (重新抓取)", use_container_width=True):
+        st.cache_data.clear()
+        st.success("✅ 快取已清除，請重新整理網頁！")
 
-    try: fugle_stock = RestClient(api_key=fugle_api_key).stock
-    except: fugle_stock = None
+    if st.button("🚀 強迫 GitHub 核心立即突擊", use_container_width=True):
+        st.info("📡 正在向 GitHub 發射最高特權 204 暗號...")
+        owner, repo, token = "b0115080-prog", "money888", os.getenv("GITHUB_TOKEN")
+        try:
+            res = GLOBAL_SESSION.post(f"https://api.github.com/repos/{owner}/{repo}/dispatches", json={"event_type": "google_track_trigger"}, headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}, timeout=5)
+            if res.status_code == 204: st.success("✅ GitHub 已經插隊開機！請靜待 45 秒查看 LINE 通知。")
+            else: st.error(f"❌ 呼叫失敗，狀態碼: {res.status_code}")
+        except Exception as e: st.error(f"❌ 連線異常: {e}")
 
-    try: batch_hist = yf.download(tickers, period="3mo", group_by='ticker', auto_adjust=True, progress=False)
-    except: batch_hist = pd.DataFrame()
+# --- 3. 網頁主視覺區 ---
+st.title("🎯 領航員風向觀測站")
+st.subheader("隨時監控即時氣流、量能潮汐與大船暗流動向")
+
+# --- 4. 運算核心開始 ---
+tickers = get_clean_tickers()
+legal_data = fetch_market_daily_data()
+
+summary_rows = []
+errors = []
+
+try:
+    fugle_client = RestClient(api_key=os.getenv("FUGLE_API_KEY"))
+    fugle_stock = fugle_client.stock
+except: fugle_stock = None
+
+with st.spinner("🔄 正在背景高速運算中（全面啟動批次矩陣下載）..."):
+    try:
+        batch_hist = yf.download(tickers, period="3mo", group_by='ticker', auto_adjust=True, progress=False)
+    except Exception as e:
+        st.error(f"❌ Yahoo Finance 批次下載失敗: {e}")
+        batch_hist = pd.DataFrame()
 
     for ticker in tickers:
         try:
@@ -189,25 +179,19 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
             
             if hist.empty or len(hist) < 25: continue
             fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
-            company_name = get_company_name_cached(fugle_symbol, fugle_api_key)
+            company_name = get_company_name_cached(fugle_symbol, os.getenv("FUGLE_API_KEY"))
 
-            # 🚀 智能非零籌碼判斷分配器
+            # 籌碼匹配
             foreign_buy, sitc_buy, chip_source = "未取得", "未取得", "⚠️ 查無資料"
-            if legal_data.get("__USE_FINMIND__"):
-                target_date = legal_data["__TARGET_DATE__"]
-                foreign_buy, sitc_buy, chip_source = fetch_finmind_chips_for_date(session, fugle_symbol, target_date)
-            else:
-                stock_legal = legal_data.get(fugle_symbol)
-                if stock_legal:
-                    try:
-                        foreign_buy = int(float(str(stock_legal.get('foreign', '0')).replace(',', ''))) // 1000
-                        sitc_buy = int(float(str(stock_legal.get('sitc', '0')).replace(',', ''))) // 1000
-                        chip_source = stock_legal.get('source', '官方盤後')
-                    except: pass
+            stock_legal = legal_data.get(fugle_symbol)
+            if stock_legal:
+                try:
+                    foreign_buy = int(float(str(stock_legal.get('foreign', '0')).replace(',', ''))) // 1000
+                    sitc_buy = int(float(str(stock_legal.get('sitc', '0')).replace(',', ''))) // 1000
+                    chip_source = stock_legal.get('source', '官方盤後')
+                except: pass
 
-            if foreign_buy in ["未取得", 0] and sitc_buy in ["未取得", 0] and not legal_data.get("__USE_FINMIND__"):
-                foreign_buy, sitc_buy, chip_source = fetch_finmind_chips_fallback(session, fugle_symbol)
-
+            # 富果盤中行情即時對齊 (單位正名不乘1000)
             if fugle_stock:
                 try:
                     quote = fugle_stock.intraday.quote(symbol=fugle_symbol)
@@ -217,6 +201,7 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
                         if fugle_vol > 0: hist.iloc[-1, hist.columns.get_loc('Volume')] = fugle_vol
                 except: pass
 
+            # 四維指標防彈運算
             hist['5MA'] = hist['Close'].rolling(window=5).mean()
             hist['20MA'] = hist['Close'].rolling(window=20).mean()
             hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
@@ -250,6 +235,7 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
             if ma_vol <= 0: ma_vol = 1
             vol_ratio = current_vol / ma_vol
             
+            # 真突破前高判定 (High 滾動突破)
             highest_20d_high = hist['High'].rolling(window=20).max().iloc[-2]
             is_breakout = today['Close'] > highest_20d_high
             
@@ -274,18 +260,10 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
                 "籌碼來源": chip_source, "即時狀態": status_signal
             })
         except Exception as e: errors.append(f"{ticker} ({str(e)[:15]})")
-            
-    return summary_rows, errors
-
-# 渲染網頁
-tickers = get_clean_tickers()
-legal_data = fetch_market_daily_data(tuple(tickers)) # 轉換成tuple快取
-
-with st.spinner("🔄 正在背景高速運算中（日期最優先戰術雷達啟動）..."):
-    summary_rows, errors = generate_dashboard_data(tickers, legal_data, os.getenv("FUGLE_API_KEY"))
 
 if errors: st.sidebar.warning(f"⚠️ 異常提示：{', '.join(errors)}")
 
+# 表格渲染
 df_display = pd.DataFrame(summary_rows)
 if not df_display.empty:
     col1, col2, col3 = st.columns(3)
@@ -299,3 +277,4 @@ if not df_display.empty:
             subset=['即時狀態', 'KD訊號', 'MACD訊號', '籌碼來源']
         ), use_container_width=True, hide_index=True
     )
+else: st.info("📭 目前清單為空。若是開盤前突發資料異常，請點擊左側「🧹 清除網頁快取」後重新整理。")
