@@ -124,8 +124,8 @@ def fetch_finmind_chips(ticker_digits):
     return "未取得", "未取得", "⚠️ 查無資料"
 
 # --- 3. 網頁視覺化標題區 ---
-st.title("🎯 台股主力狙擊大本營")
-st.subheader("隨時監控即時行情、技術面多空與真實法人籌碼")
+st.title("🎯 領航員風向觀測站")
+st.subheader("隨時監控即時氣流、量能潮汐與大船暗流動向")
 
 # 側邊欄控制
 if st.sidebar.button("🧹 清除網頁快取 (重新抓取)", use_container_width=True):
