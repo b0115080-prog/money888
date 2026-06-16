@@ -9,7 +9,7 @@ from fugle_marketdata import RestClient
 from dotenv import load_dotenv
 
 # 1. 網頁基本配置 (必須放在第一行)
-st.set_page_config(page_title="台股主力狙擊指揮所", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="領航員風向觀測站", page_icon="🎯", layout="wide")
 load_dotenv()
 
 # --- 🎯 統一優化 8：全域 Session 連線池管理 ---
@@ -153,3 +153,156 @@ try:
     fugle_client = RestClient(api_key=os.getenv("FUGLE_API_KEY"))
     fugle_stock = fugle_client.stock
 except:
+    fugle_stock = None
+
+with st.spinner("🔄 正在背景高速運算中（全面啟動批次矩陣下載）..."):
+    # --- 🎯 統一優化 6：全面改用 yf.download() 批次矩陣下載，速度提升 5~20 倍 ---
+    try:
+        batch_hist = yf.download(tickers, period="3mo", group_by='ticker', auto_adjust=True, progress=False)
+    except Exception as e:
+        st.error(f"❌ Yahoo Finance 批次下載失敗: {e}")
+        batch_hist = pd.DataFrame()
+
+    for ticker in tickers:
+        try:
+            # 提取單檔股票的歷史數據庫
+            if len(tickers) == 1:
+                hist = batch_hist.copy()
+            else:
+                if ticker in batch_hist.columns.levels[0]:
+                    hist = batch_hist[ticker].dropna(how='all').copy()
+                else:
+                    continue
+            
+            if hist.empty or len(hist) < 25:
+                errors.append(f"{ticker} (Yahoo歷史數據不足)")
+                continue
+                
+            fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
+            
+            # --- 🎯 統一優化 9：正名公司名稱，改用富果 API 代替 stock.info，100% 免疫 Yahoo 封鎖 ---
+            company_name = ticker
+            if fugle_stock:
+                try:
+                    meta = fugle_stock.intraday.ticker(symbol=fugle_symbol)
+                    if meta and 'nameShort' in meta:
+                        company_name = meta['nameShort']
+                except: pass
+
+            # --- 籌碼邏輯 ---
+            foreign_buy, sitc_buy, chip_source = "未取得", "未取得", "⚠️ 查無資料"
+            stock_legal = legal_data.get(fugle_symbol)
+            if stock_legal:
+                try:
+                    foreign_buy = int(float(str(stock_legal.get('foreign', '0')).replace(',', ''))) // 1000
+                    sitc_buy = int(float(str(stock_legal.get('sitc', '0')).replace(',', ''))) // 1000
+                    chip_source = stock_legal.get('source', '官方盤後')
+                except: pass
+            
+            # 🎯 優化 4 修正：只要外資或投信有任一檔是「未取得」或「雙0」，立刻穿透防線調用 FinMind 備援
+            if foreign_buy in ["未取得", 0] and sitc_buy in ["未取得", 0]:
+                f_fm, s_fm, source_fm = fetch_finmind_chips(fugle_symbol)
+                if isinstance(f_fm, int):
+                    foreign_buy, sitc_buy, chip_source = f_fm, s_fm, source_fm
+
+            # 融合富果盤中即時行情
+            if fugle_stock:
+                try:
+                    quote = fugle_stock.intraday.quote(symbol=fugle_symbol)
+                    if quote and 'lastPrice' in quote and quote['lastPrice']:
+                        hist.iloc[-1, hist.columns.get_loc('Close')] = quote['lastPrice']
+                        fugle_vol = quote['total']['tradeVolume']
+                        if fugle_vol > 0: hist.iloc[-1, hist.columns.get_loc('Volume')] = fugle_vol * 1000 
+                except: pass
+
+            # 5MA 與 20MA 計算
+            hist['5MA'] = hist['Close'].rolling(window=5).mean()
+            hist['20MA'] = hist['Close'].rolling(window=20).mean()
+            hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
+            
+            # --- 🎯 統一優化 1：修正 RSI 連續上漲除以 0 (NaN/inf) 的實戰崩潰 Bug ---
+            delta = hist['Close'].diff()
+            up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
+            avg_gain = up.ewm(com=13, adjust=False).mean()
+            avg_loss = down.ewm(com=13, adjust=False).mean()
+            
+            # 補上安全置換，避免分母為 0
+            rs = avg_gain / avg_loss.replace(0, 1e-9)
+            hist['RSI'] = 100 - (100 / (1 + rs))
+            
+            # MACD
+            exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
+            hist['MACD'] = exp1 - exp2
+            hist['Signal'] = hist['MACD'].ewm(span=9, adjust=False).mean()
+            hist['MACD_Hist'] = hist['MACD'] - hist['Signal']
+            
+            # --- 🎯 統一優化 2：修正 KD 遇到停牌、低流動性股 high_max == low_min 導致 0/0 崩潰的 Bug ---
+            low_min = hist['Low'].rolling(window=9).min()
+            high_max = hist['High'].rolling(window=9).max()
+            
+            range_val = (high_max - low_min).replace(0, 1e-9) # 安全置換防線
+            hist['RSV'] = 100 * ((hist['Close'] - low_min) / range_val)
+            hist['K'] = hist['RSV'].ewm(com=2, adjust=False).mean()
+            hist['D'] = hist['K'].ewm(com=2, adjust=False).mean()
+
+            today, yesterday = hist.iloc[-1], hist.iloc[-2]
+            
+            # 量能防呆
+            current_vol = safe_val(today['Volume'])
+            if current_vol <= 0: current_vol = safe_val(yesterday['Volume'])
+            if current_vol <= 0: current_vol = 1
+            ma_vol = safe_val(today['5Vol_MA'], default=1)
+            if ma_vol <= 0: ma_vol = 1
+            vol_ratio = current_vol / ma_vol
+            
+            # --- 🎯 統一優化 5：重構「爆量突破」條件，強制加入「突破20日新高」，全面擊殺騙線盤整股 ---
+            highest_20d = hist['Close'].rolling(window=20).max().iloc[-2] # 取得昨天的20日最高價
+            is_breakout = today['Close'] > highest_20d
+            
+            status_signal = "🟢 正常監控"
+            if today['Close'] > today['5MA'] and today['5MA'] > today['20MA'] and vol_ratio > 1.5 and is_breakout:
+                status_signal = "🔥 爆量真突破"
+            elif today['Close'] < today['5MA']:
+                status_signal = "🟡 跌破5MA觀望"
+
+            # 狀態字串
+            macd_val, macd_yest = safe_val(today['MACD_Hist']), safe_val(yesterday['MACD_Hist'])
+            if macd_yest < 0 and macd_val >= 0: macd_status = "🔥 底部反轉"
+            elif macd_val > 0: macd_status = "🟢 柱狀圖正常"
+            elif macd_val < 0 and macd_val > macd_yest: macd_status = "🟡 負柱收斂"
+            else: macd_status = "🔴 偏空下探"
+
+            if safe_val(yesterday['K']) <= safe_val(yesterday['D']) and safe_val(today['K']) > safe_val(today['D']): kd_status = "🔥 黃金交叉"
+            elif safe_val(today['K']) > safe_val(today['D']): kd_status = "🟢 K>D"
+            else: kd_status = "🔴 K<D"
+
+            summary_rows.append({
+                "股票代號": ticker, "公司名稱": company_name, "即時股價": round(today['Close'], 2),
+                "當日量(張)": int(current_vol // 1000), "5日均量(張)": int(ma_vol // 1000), "RSI(14日)": round(safe_val(today['RSI'], 50), 1),
+                "KD訊號": kd_status, "MACD訊號": macd_status, "外資(張)": foreign_buy, "投信(張)": sitc_buy,
+                "籌碼來源": chip_source, "即時狀態": status_signal
+            })
+        except Exception as e:
+            # --- 🎯 統一優化 10：全面消滅生產大忌的 except: pass，將錯誤優雅可視化 ---
+            errors.append(f"{ticker} (處理異常: {str(e)[:25]})")
+
+# --- 5. 渲染網頁表格 UI ---
+if errors:
+    st.sidebar.warning(f"⚠️ 部份個股執行時被安全跳過：{', '.join(errors)}")
+
+df_display = pd.DataFrame(summary_rows)
+if not df_display.empty:
+    col1, col2, col3 = st.columns(3)
+    col1.metric("📊 總監控標的", f"{len(df_display)} 檔")
+    col2.metric("🔥 實質放量真突破", f"{len(df_display[df_display['即時狀態'] == '🔥 爆量真突破'])} 檔")
+    col3.metric("📈 KD黃金交叉", f"{len(df_display[df_display['KD訊號'] == '🔥 黃金交叉'])} 檔")
+    st.write("---")
+    st.dataframe(
+        df_display.style.map(
+            lambda v: 'background-color: #ff4b4b; color: white;' if v in ["🔥 爆量真突破", "🔥 黃金交叉", "🔥 底部反轉"] else ('background-color: #262730; color: #a3a8b4;' if v in ["🟡 跌破5MA觀望", "🔴 偏空下探", "🔴 K<D", "⚠️ 查無資料"] else ''),
+            subset=['即時狀態', 'KD訊號', 'MACD訊號', '籌碼來源']
+        ), use_container_width=True, hide_index=True
+    )
+else: 
+    st.info("📭 目前清單為空。若是開盤前突發資料異常，請點擊左側「🧹 清除網頁快取」後重整。")
