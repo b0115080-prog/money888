@@ -27,12 +27,12 @@ def get_clean_tickers():
 
 @st.cache_data(ttl=300)
 def fetch_market_daily_data():
-    """🚀 官方時光機 (純上市版)：針對單日強制重試 2 次"""
+    """🚀 官方時光機 (純上市版)：針對單日強制重試 2 次，徹底移除上櫃邏輯"""
     legal_data = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
-    # 1. 上市 OpenAPI
+    # 1. 上市 OpenAPI (強制重試 2 次)
     for _ in range(2):
         try:
             res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", headers=headers, timeout=5)
@@ -54,7 +54,7 @@ def fetch_market_daily_data():
             date_str = dt.strftime("%Y%m%d")
             
             day_success = False
-            for _ in range(2): # 🚀 改為 2 次強制重試
+            for _ in range(2): # 🚀 強制重試 2 次
                 try:
                     res = requests.get(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL", headers=headers, timeout=5)
                     data = res.json()
@@ -78,7 +78,7 @@ def fetch_market_daily_data():
     return legal_data
 
 def fetch_finmind_chips(ticker_digits):
-    """🚀 終極備援防線：只要是 0 就自動找前一天，直到找到真實數據"""
+    """🚀 終極備援防線：中英雙語防彈解析，只要是 0 就自動找前一天！"""
     try:
         tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         start_date = (tw_now - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
@@ -94,18 +94,20 @@ def fetch_finmind_chips(ticker_digits):
             
             for date in dates:
                 df_date = df[df['date'] == date]
-                f_df = df_date[df_date['name'].str.contains('外資')]
-                s_df = df_date[df_date['name'].str.contains('投信')]
+                
+                # 💡 核心修正：同時捕捉中英文，破解 FinMind 語言陷阱
+                f_df = df_date[df_date['name'].str.contains('Foreign|外資', case=False, na=False)]
+                s_df = df_date[df_date['name'].str.contains('Investment|投信', case=False, na=False)]
                 
                 foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
                 sitc_buy = (s_df['buy'].sum() - s_df['sell'].sum()) // 1000
                 
-                # 💡 核心邏輯：只要不是 0，就代表找到真實資料，立刻回傳！
+                # 💡 智能非零追溯：只要這天不是雙0，就代表找到真實資料，立刻回傳！
                 if foreign_buy != 0 or sitc_buy != 0:
                     short_date = date[5:].replace('-', '/')
                     return int(foreign_buy), int(sitc_buy), f"FinMind歷史({short_date})"
             
-            # 如果這10天真的全是0，回傳最近一天的0
+            # 如果這10天真的全是0 (例如極度冷門ETF)，回傳最新日期的0
             latest = dates[0]
             return 0, 0, f"FinMind歷史({latest[5:].replace('-', '/')})"
     except: pass
@@ -143,7 +145,7 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
                     chip_source = stock_legal.get('source', '官方盤後')
                 except: pass
             
-            # 🚀 智能非零追溯：若官方沒資料，或資料為 0 (盤中尚未結算)，啟動 FinMind 往回撈！
+            # 🚀 若官方沒資料或為 0 (盤中尚未結算)，自動往回撈前一個非零交易日！
             if foreign_buy in ["未取得", 0] and sitc_buy in ["未取得", 0]:
                 f_fm, s_fm, source_fm = fetch_finmind_chips(fugle_symbol)
                 if isinstance(f_fm, int):
@@ -231,7 +233,7 @@ if st.sidebar.button("🚀 強迫 GitHub 核心立即突擊", use_container_widt
 tickers = get_clean_tickers()
 legal_data = fetch_market_daily_data()
 
-with st.spinner("🔄 正在背景高速運算中（具備防阻擋系統）..."):
+with st.spinner("🔄 正在背景高速運算中（純上市防彈引擎）..."):
     summary_rows, errors = generate_dashboard_data(tickers, legal_data, os.getenv("FUGLE_API_KEY"))
 
 if errors:
