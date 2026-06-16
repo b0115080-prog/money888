@@ -61,9 +61,6 @@ def fetch_stock_names_map():
     except: pass
     return name_map
 
-# 在 generate_dashboard_data 中，將名稱抓取改為：
-# company_name = names_map.get(fugle_symbol, ticker)
-
 @st.cache_data(ttl=300)
 def fetch_market_daily_data(tickers_list):
     """🚀 【日期優先交叉天網核心】：當日官方失憶或失敗，在同一個日期內立刻逼迫 FinMind 備援，絕不跨日滑坡！"""
