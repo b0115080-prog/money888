@@ -19,7 +19,7 @@ FUGLE_API_KEY = os.getenv("FUGLE_API_KEY")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_USER_ID = os.getenv("LINE_USER_ID")
 
-# --- 0. 工具函式（移至全域，避免迴圈內重複宣告消耗效能） ---
+# --- 0. 工具函式 ---
 def parse_vol(val):
     """將證交所原始股數轉換為張數"""
     if isinstance(val, str):
@@ -35,19 +35,11 @@ def parse_vol(val):
 try:
     SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQz7MmTCJQAkMs8qpyLtpQOuZF4LpW3f3or51CH0USOIFLgEATnjUcX4lP6JfKl7RPTciy4-cEDPYmg/pub?output=csv"
     df_tickers = pd.read_csv(SHEET_CSV_URL, header=None) 
-    
-    # 🚀 防禦一：先砍掉真實的數學空值
+    # 防禦：殺死空值與 nan，並去除重複
     df_tickers = df_tickers.dropna(subset=[0])
-    
-    # 🚀 防禦二：淨化隱形字元
     df_tickers[0] = df_tickers[0].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip()
-    
-    # 🚀 防禦三：嚴格排除字串 'nan'
     raw_tickers = [t for t in df_tickers[0].tolist() if t.lower() != 'nan' and t]
-    
-    # 🚀 防禦四：強制去除重複標的！(即使試算表不小心重複輸入，也只會通知一次)
     target_tickers = list(dict.fromkeys(raw_tickers))
-    
     print(f"✅ 成功從雲端讀取並全面淨化 {len(target_tickers)} 檔追蹤標的！")
 except Exception as e:
     print(f"⚠️ 讀取 Google 表單失敗，使用備用清單。錯誤: {e}")
@@ -55,7 +47,6 @@ except Exception as e:
 
 # --- 2. 外部數據爬蟲模組 ---
 def fetch_stock_news_v2(ticker, company_name):
-    """【精準分流】嚴格抓取 Yahoo 3 則 + Google News 3 則最新相關新聞"""
     yahoo_news, google_news = [], []
     try:
         stock = yf.Ticker(ticker)
@@ -70,135 +61,124 @@ def fetch_stock_news_v2(ticker, company_name):
         feed = feedparser.parse(url)
         for entry in feed.entries[:3]: google_news.append(entry.title)
     except Exception: pass
-        
     return yahoo_news[:3], google_news[:3]
 
-def fetch_twse_daily_data():
-    """從證交所 OpenAPI 抓取法人買賣超與本益比，並強制對 Key 進行去空白淨化"""
-    print("📥 正在從證交所下載官方盤後籌碼與財報數據...")
-    legal_data = {}
+def fetch_market_daily_data():
+    """🚀 痛點1修復：全面涵蓋上市與上櫃，精準抓取「含自營商」之總外資數據"""
+    print("📥 正在從證交所與櫃買中心下載官方盤後籌碼數據...")
+    legal_data, pe_data = {}, {}
+    
+    # 1. 上市 (TWSE) 籌碼
     try:
-        legal_entity_res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", timeout=8)
-        if legal_entity_res.status_code == 200:
-            for item in legal_entity_res.json():
-                code = item.get('Code' or 'StockNo', '').strip()
+        res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", timeout=8)
+        if res.status_code == 200:
+            for item in res.json():
+                code = item.get('Code', '').strip()
                 if code:
-                    legal_data[code] = item
+                    f_buy = item.get('ForeignInvestmentIncludeForeignDealersBuyBuyOver', item.get('ForeignInvestmentBuyBuyOver', '0'))
+                    s_buy = item.get('InvestmentTrustBuyBuyOver', '0')
+                    legal_data[code] = {'foreign': f_buy, 'sitc': s_buy}
     except Exception as e:
-        print(f"⚠️ 證交所籌碼下載失敗: {e}")
+        print(f"⚠️ 上市籌碼下載失敗: {e}")
 
-    pe_data = {}
+    # 2. 上櫃 (TPEx) 籌碼
+    try:
+        res = requests.get("https://openapi.tpex.org.tw/v1/tpex_38", timeout=8)
+        if res.status_code == 200:
+            for item in res.json():
+                code = item.get('SecuritiesCompanyCode', '').strip()
+                if code:
+                    f_buy = item.get('ForeignInvestorsNetBuySell', '0')
+                    s_buy = item.get('InvestmentTrustsNetBuySell', '0')
+                    legal_data[code] = {'foreign': f_buy, 'sitc': s_buy}
+    except Exception as e:
+        print(f"⚠️ 上櫃籌碼下載失敗: {e}")
+
+    # 3. 本益比
     try:
         pe_res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", timeout=8)
         if pe_res.status_code == 200:
             for item in pe_res.json():
                 code = item.get('Code', '').strip()
-                if code:
-                    pe_data[code] = item
-    except Exception as e:
-        print(f"⚠️ 證交所本益比下載失敗: {e}")
+                if code: pe_data[code] = item
+    except: pass
 
     return legal_data, pe_data
 
 def fetch_latest_ptt_post(ticker_digits):
-    """【黑科技繞過版】利用 Google RSS 間接搜尋 PTT 股版文章，100% 免疫 PTT 官方的 10054 封鎖"""
     try:
         url = f"https://news.google.com/rss/search?q=site:ptt.cc/bbs/Stock+{ticker_digits}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
         feed = feedparser.parse(url)
         if feed.entries:
             latest_entry = feed.entries[0]
-            raw_title = latest_entry.title
-            clean_title = raw_title.split(" - 看板")[0].strip()
-            
+            clean_title = latest_entry.title.split(" - 看板")[0].strip()
             date_str = "未知"
             if hasattr(latest_entry, 'published_parsed') and latest_entry.published_parsed:
                 tm = latest_entry.published_parsed
                 date_str = f"{tm.tm_mon:02d}/{tm.tm_mday:02d}"
-            
             return {"title": clean_title, "date": date_str}
-    except Exception as e:
-        print(f"⚠️ PTT 間接搜尋失敗: {e}")
+    except: pass
     return None
 
 def fetch_latest_dcard_post(ticker_digits):
-    """【精準搜尋】透過 Dcard 搜尋 API 鎖定股市版該股代號，只取最新一則與日期"""
     url = f"https://www.dcard.tw/_api/search/posts?query={ticker_digits}&forum=stock&limit=1"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"}
     try:
         res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            posts = res.json()
-            if posts:
-                post = posts[0]
-                raw_date = post.get('createdAt', '')
-                date_str = "未知"
-                if len(raw_date) >= 10:
-                    parts = raw_date[:10].split('-')
-                    if len(parts) == 3: date_str = f"{parts[1]}/{parts[2]}"
-                return {"title": post.get('title', ''), "date": date_str}
-    except Exception as e:
-        print(f"⚠️ Dcard 搜尋失敗: {e}")
+        if res.status_code == 200 and res.json():
+            post = res.json()[0]
+            raw_date = post.get('createdAt', '')
+            date_str = f"{raw_date[5:7]}/{raw_date[8:10]}" if len(raw_date) >= 10 else "未知"
+            return {"title": post.get('title', ''), "date": date_str}
+    except: pass
     return None
 
-# --- 3. AI 判讀模組 (雙金鑰 X 雙模型 4階段交叉防禦版) ---
+# --- 3. AI 判讀模組 ---
 def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post):
-    """【大局觀進化版】嚴格規範籌碼定義與新聞判讀邏輯，杜絕 AI 幻覺"""
     key1 = os.getenv("GEMINI_API_KEY")
     key2 = os.getenv("GEMINI_API_KEY_BACKUP")
     
     strategies = []
-    if key1:
-        strategies.append({"key": key1, "model": "gemini-3.1-flash-lite", "desc": "主要金鑰 + 3.1-Flash-Lite"})
-    if key2:
-        strategies.append({"key": key2, "model": "gemini-3.1-flash-lite", "desc": "備用金鑰 + 3.1-Flash-Lite"})
-    if key1:
-        strategies.append({"key": key1, "model": "gemini-3-flash", "desc": "主要金鑰 + Gemini-3-Flash"})
-    if key2:
-        strategies.append({"key": key2, "model": "gemini-3-flash", "desc": "備用金鑰 + Gemini-3-Flash"})
+    if key1: strategies.append({"key": key1, "model": "gemini-3.1-flash-lite", "desc": "主要金鑰 + 3.1-Flash-Lite"})
+    if key2: strategies.append({"key": key2, "model": "gemini-3.1-flash-lite", "desc": "備用金鑰 + 3.1-Flash-Lite"})
+    if key1: strategies.append({"key": key1, "model": "gemini-3-flash", "desc": "主要金鑰 + Gemini-3-Flash"})
+    if key2: strategies.append({"key": key2, "model": "gemini-3-flash", "desc": "備用金鑰 + Gemini-3-Flash"})
         
-    if not strategies: 
-        return "⚠️ 未設定任何 Gemini API Key，跳過 AI 判讀。"
+    if not strategies: return "⚠️ 未設定 Gemini API Key。"
         
     yahoo_text = "\n".join(f"- {n}" for n in yahoo_news) if yahoo_news else "暫無資料"
     google_text = "\n".join(f"- {n}" for n in google_news) if google_news else "暫無資料"
-    ptt_text = f"標題：{ptt_post['title']} (發文日期：{ptt_post['date']})" if ptt_post else "今日無相關專文討論"
-    dcard_text = f"標題：{dcard_post['title']} (發文日期：{dcard_post['date']})" if dcard_post else "今日無相關專文討論"
+    ptt_text = f"標題：{ptt_post['title']} ({ptt_post['date']})" if ptt_post else "今日無相關專文討論"
+    dcard_text = f"標題：{dcard_post['title']} ({dcard_post['date']})" if dcard_post else "今日無相關專文討論"
     
-    # 🎯 重構版 Prompt：同步加入 KD 訊號與 MACD 精細判讀
+    # 🚀 痛點3修復：植入主力反市場心理學
     prompt = f"""
-    你現在是精通台股基本面、籌碼面與社群輿情（PTT/Dcard）的量化交易員。
+    你現在是精通台股基本面、籌碼面與社群輿情（PTT/Dcard）的頂尖量化操盤手。
     標的：{company_name} ({ticker})
     
     【目前技術與籌碼狀態】
     - KD指標：{tech_info.get('kd_signal', '無')} | MACD：{tech_info['macd_signal']} | 均線：{tech_info['ma_signal']}
-    - RSI(14日)：{tech_info['rsi']:.1f} | 官方本益比：{tech_info['pe']} 
+    - RSI(14日)：{tech_info['rsi']:.1f} | 量能狀態：{tech_info['vol_signal']}
     - 近日單日外資買賣超：{tech_info.get('foreign_buy', 0)}張 
     - 近日單日投信買賣超：{tech_info.get('sitc_buy', 0)}張
     
-    【最新 Yahoo 新聞 (最多3則)】
-    {yahoo_text}
+    【最新新聞】
+    {yahoo_text}\n{google_text}
     
-    【最新 Google News (最多3則)】
-    {google_text}
-    
-    【PTT 股版最新個股討論】
-    {ptt_text}
-    
-    【Dcard 股市版最新個股討論】
-    {dcard_text}
+    【社群討論】
+    PTT: {ptt_text} | Dcard: {dcard_text}
 
-    🚨【大局觀與情報限制令 - 嚴格遵守】🚨
-    1. 籌碼判讀：上方提供的張數為「單日買賣超動向」，請用以判斷短線資金方向，嚴禁將其解讀為外資或投信的「總持股數」。
-    2. 題材與新聞：請務必根據上方提供的「最新新聞標題」來判斷題材熱度。若有如跨國產業鏈事件（例如 Space X 上市等重大新聞），必須列入強勢利多考量；若無相關新聞，請誠實回答「目前缺乏最新題材催化」，絕不准自行捏造或使用舊記憶。
-    3. 社群輿情：請嚴格參考上方爬取的發文日期，若日期超過一週以上，請判定為「近期無熱度」，不准過度腦補。
-    
-    請綜合上述精簡數據，精準研判這是『實質利多真突破』還是『主力騙線陷阱』？
-    嚴格依照以下格式輸出繁體中文（不要包含任何 markdown 粗體符號 `**`）：
-    
+    🚨【主力反市場心理學 - 終極判讀法則 (嚴格遵守)】🚨
+    1. 籌碼定調：上方提供的張數為真實法人的「單日買賣超動向」，絕不可誤判為總持股。
+    2. 完美起漲點判斷：當「法人大舉買超」且「技術面翻多（如KD金叉、負柱收斂或爆量）」時，若「社群討論度極低（無專文或日期久遠）」，【嚴禁】判定為冷門或缺乏題材！這在台股代表「散戶尚未察覺、籌碼極度乾淨」，請給予『強勢買點』評級，視為主力偷偷吃貨的完美潛伏期。
+    3. 主力出貨風險：反之，當技術與籌碼雖好，但「社群討論度爆表、散戶極度狂熱」時，反而必須提示主力可能趁機逢高出貨的風險。
+    4. 聯網題材：請依據上方提供的新聞標題判斷題材，若無新聞請誠實回答無，不准捏造舊新聞。
+
+    請依照以下格式輸出繁體中文（不要包含任何 markdown 粗體符號 **）：
     🗣️ 網路社群輿情觀點：
-    - PTT 最新動向：(簡述PTT那則文章的態度與日期，若無請寫無)
-    - Dcard 最新動向：(簡述Dcard那則文章的態度與日期，若無請寫無)
-    - 散戶心理綜合研判：(一句話總結市場散戶是樂觀還是恐慌)
+    - PTT 最新動向：(簡述PTT態度與日期，若無請寫無)
+    - Dcard 最新動向：(簡述Dcard態度與日期，若無請寫無)
+    - 散戶心理綜合研判：(依據反市場心理學總結)
     
     🤖 AI 綜合判讀報告：
     - 研判結論：(強勢買點 / 觀望 / 誘多陷阱 / 資訊不足)
@@ -207,46 +187,21 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
     """
 
     for idx, strat in enumerate(strategies):
-        current_key = strat["key"]
-        model_name = strat["model"]
-        description = strat["desc"]
-        
         try:
-            print(f"   > 🛡️ 正在嘗試防線 {idx+1}: {description}...")
-            client = genai.Client(api_key=current_key.strip())
-            response = client.models.generate_content(model=model_name, contents=prompt)
-            
-            if idx > 0: 
-                print(f"🔄 [交叉陣列救援成功] 成功透過【{description}】突襲通關，取得 AI 報告！")
+            print(f"   > 🛡️ 正在嘗試防線 {idx+1}: {strat['desc']}...")
+            client = genai.Client(api_key=strat["key"].strip())
+            response = client.models.generate_content(model=strat["model"], contents=prompt)
             return response.text
-            
         except Exception as e:
             error_str = str(e)
-            print(f"❌ 防線 {idx+1} ({model_name}) 宣告失守。")
-            
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                if idx < len(strategies) - 1:
-                    wait_time = 8.0  
-                    match = re.search(r"Please retry in ([\d\.]+)s", error_str)
-                    if match:
-                        wait_time = float(match.group(1)) + 1.5
-                    
-                    print(f"⏳ [矩陣避難] 主要管道撞牆。依據官方指示原地安全休眠 {wait_time:.2f} 秒...")
-                    time.sleep(wait_time)
-                    print(f"⚡ 緩衝期結束，立刻切換至下一道防線！")
-                    continue 
-                else:
-                    print("⚠️ 警告：已經耗盡所有交叉組合，後面已無防線。")
-            else:
-                if idx < len(strategies) - 1:
-                    print("⚠️ 遭遇非常規錯誤，立即無縫更換至下一套組合方案...")
-                    continue
-                
-    return "❌ 經過雙金鑰與雙模型的 4 輪矩陣交叉突襲，所有免費通道（含備用池）均已達上限，本次內文略過 AI 報告。"
+            if "429" in error_str and idx < len(strategies) - 1:
+                match = re.search(r"Please retry in ([\d\.]+)s", error_str)
+                time.sleep(float(match.group(1)) + 1.5 if match else 8.0)
+                continue
+    return "❌ 經過矩陣交叉突襲，所有通道均已達上限，略過 AI 報告。"
 
-# --- 3.5 LINE 傳播模組 ---
+# --- 3.5 LINE 傳播模組 (保留完整詳細除錯資訊版) ---
 def send_line_notify(message):
-    """將文字訊息推播至 LINE Messaging API"""
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID:
         print("⚠️ 未設定 LINE 金鑰，略過推播。")
         return
@@ -262,7 +217,7 @@ def send_line_notify(message):
 # --- 4. 核心掃描策略 ---
 def run_sniper_bot():
     print("[主力狙擊機器人 - 高敏感度雷達旗艦版] 啟動！開始掃描...\n")
-    legal_data, pe_data = fetch_twse_daily_data()
+    legal_data, pe_data = fetch_market_daily_data()
     
     try:
         fugle_client = RestClient(api_key=FUGLE_API_KEY)
@@ -277,75 +232,59 @@ def run_sniper_bot():
             info = stock.info
             company_name = info.get("shortName", ticker)
             
-            # 🚀 核心優化：開啟 actions=True 強制載入 Yahoo 歷史資料庫中的法人進出隱藏表
             hist = stock.history(period="6mo", actions=True)
-            if hist.empty or len(hist) < 30:
-                print(f"- {company_name} ({ticker}) 歷史資料不足，跳過。")
-                continue
+            if hist.empty or len(hist) < 30: continue
                 
             fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
             stock_pe_info = pe_data.get(fugle_symbol, {})
+            
+            # 應用精準混合籌碼 (含上市上櫃)
             stock_legal_info = legal_data.get(fugle_symbol, {})
-
-            official_pe = stock_pe_info.get('PEratio', '') or '無'
-            dividend_yield = stock_pe_info.get('DividendYield', '') or '無'
+            foreign_buy_vols = parse_vol(stock_legal_info.get('foreign', '0'))
+            sitc_buy_vols = parse_vol(stock_legal_info.get('sitc', '0'))
+            chip_source_msg = "今日盤後(含上櫃)"
             
-            # === 🚀 核心籌碼：全面改走 Yahoo 免費歷史定格防線 ===
-            chip_source_msg = "今日最新盤後"
-            
-            # 1. 下午 14:30 之後，優先使用全台最精準的證交所官方 OpenAPI
-            foreign_buy_vols = parse_vol(stock_legal_info.get('ForeignInvestmentBuyBuyOver', '0'))
-            sitc_buy_vols = parse_vol(stock_legal_info.get('InvestmentTrustBuyBuyOver', '0'))
-            
-            # 💡 2. 盤中救援（兩點半前）：證交所是空殼時，不靠富果，直接撈取 yfinance 的昨日法人數據！
             if foreign_buy_vols == 0 and sitc_buy_vols == 0:
                 try:
-                    # 判斷 yfinance 隱藏擴充欄位是否存在
                     if 'Foreign_Net' in hist.columns or 'Net_Institutional_Investors' in hist.columns:
-                        # 讀取倒數第二筆（也就是昨日收盤定格籌碼）
                         f_col = 'Foreign_Net' if 'Foreign_Net' in hist.columns else 'Net_Institutional_Investors'
                         foreign_buy_vols = int(hist[f_col].iloc[-2]) // 1000
                         sitc_buy_vols = int(hist['SITC_Net'].iloc[-2]) // 1000 if 'SITC_Net' in hist.columns else 0
                         chip_source_msg = "昨日歷史定格"
                     else:
-                        # 萬一該股今天完全沒有法人進出，依照統計概率，從近5日成交量中依主力常態權重進行估算
                         volume_yesterday = hist['Volume'].iloc[-2]
                         foreign_buy_vols = int((volume_yesterday // 1000) * 0.12)
                         sitc_buy_vols = int((volume_yesterday // 1000) * 0.03)
                         chip_source_msg = "昨日盤後估算"
-                except Exception:
-                    chip_source_msg = "歷史備援估算"
-            # ========================================================
+                except: chip_source_msg = "歷史備援估算"
 
-            yield_msg = f"{dividend_yield}%" if dividend_yield != '無' else '無'
-            print(f"📊 官方財報 -> 本益比: {official_pe} / 殖利率: {yield_msg}")
-            print(f"🔥 法人動向 -> [{chip_source_msg}] 單日外資買賣超: {foreign_buy_vols} 張 / 單日投信買賣超: {sitc_buy_vols} 張")
+            official_pe = stock_pe_info.get('PEratio', '') or '無'
+            dividend_yield = stock_pe_info.get('DividendYield', '') or '無'
             
+            # 更新即時報價
             try:
                 quote = fugle_stock.intraday.quote(symbol=fugle_symbol)
                 hist.iloc[-1, hist.columns.get_loc('Close')] = quote['lastPrice']
-                hist.iloc[-1, hist.columns.get_loc('Volume')] = quote['total']['tradeVolume']
-            except Exception as fugle_e:
-                print(f"⚠️ 無法取得 {ticker} 即時報價，使用延遲資料: {fugle_e}")
+                fugle_vol = quote['total']['tradeVolume']
+                if fugle_vol > 0:
+                    hist.iloc[-1, hist.columns.get_loc('Volume')] = fugle_vol
+            except: pass
 
-            # === 🚀 核心升級：四維技術指標同步計算 ===
+            # --- 🚀 四維技術指標高敏計算 ---
             hist['5MA'] = hist['Close'].rolling(window=5).mean()
             hist['20MA'] = hist['Close'].rolling(window=20).mean()
             hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
             
-            # RSI (14日)
             delta = hist['Close'].diff()
             up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
             hist['RSI'] = 100 - (100 / (1 + (up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean())))
             
-            # MACD 與 柱狀圖 (MACD_Hist)
             exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
             exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
             hist['MACD'] = exp1 - exp2
             hist['Signal'] = hist['MACD'].ewm(span=9, adjust=False).mean()
             hist['MACD_Hist'] = hist['MACD'] - hist['Signal']
             
-            # KD (9日)
             low_min = hist['Low'].rolling(window=9).min()
             high_max = hist['High'].rolling(window=9).max()
             hist['RSV'] = 100 * ((hist['Close'] - low_min) / (high_max - low_min))
@@ -354,33 +293,29 @@ def run_sniper_bot():
             
             today, yesterday = hist.iloc[-1], hist.iloc[-2]
             
-            # === 🎯 訊號邏輯 (高敏觸發) ===
-            # 1. 均線與量能
+            # 🚀 痛點2修復：防呆量能計算 (避免 0.0倍)
+            current_vol = today['Volume']
+            if current_vol <= 0: current_vol = yesterday['Volume'] 
+            vol_ratio = current_vol / today['5Vol_MA'] if today['5Vol_MA'] > 0 else 1.0
+            volume_surge = vol_ratio > 1.5
+            
+            # --- 高敏訊號邏輯 ---
             golden_cross = (yesterday['5MA'] <= yesterday['20MA']) and (today['5MA'] > today['20MA'])
-            volume_surge = today['Volume'] > (today['5Vol_MA'] * 1.5)  # 敏感度提升：量能 1.5 倍即可
             bullish_alignment = (today['Close'] > today['5MA']) and (today['5MA'] > today['20MA'])
             strong_surge = today['Close'] >= (yesterday['Close'] * 1.04)
             momentum_breakout = bullish_alignment and strong_surge
-            
-            # 2. KD 訊號
             kd_golden_cross = (yesterday['K'] <= yesterday['D']) and (today['K'] > today['D'])
-            
-            # 3. MACD 訊號 (捕捉底部負柱收斂)
             macd_zero_cross = (yesterday['MACD_Hist'] < 0) and (today['MACD_Hist'] >= 0)
             macd_converge = (today['MACD_Hist'] < 0) and (today['MACD_Hist'] > yesterday['MACD_Hist'])
             
-            # === 狀態字串生成 ===
-            ma_msg = "黃金交叉！" if golden_cross else ("多頭強勢排列！" if bullish_alignment else "無明顯交會")
+            ma_msg = "黃金交叉" if golden_cross else ("多頭排列" if bullish_alignment else "無明顯交會")
             kd_msg = "🔥 KD金叉" if kd_golden_cross else ("🟢 K>D" if today['K'] > today['D'] else "🔴 K<D")
             
-            if macd_zero_cross:
-                macd_msg = "🔥 底部反轉(翻紅)"
-            elif macd_converge:
-                macd_msg = "🟡 負柱收斂"
-            else:
-                macd_msg = "🟢 柱狀圖正常" if today['MACD_Hist'] > 0 else "🔴 偏空下探"
+            if macd_zero_cross: macd_msg = "🔥 底部反轉"
+            elif macd_converge: macd_msg = "🟡 負柱收斂"
+            else: macd_msg = "🟢 柱狀正常" if today['MACD_Hist'] > 0 else "🔴 偏空下探"
                 
-            vol_msg = f"爆發量！({today['Volume']/today['5Vol_MA']:.1f}倍)" if volume_surge else "量能平穩"
+            vol_msg = f"爆發量！({vol_ratio:.1f}倍)" if volume_surge else f"量能平穩({vol_ratio:.1f}倍)"
             
             tech_info = {
                 "rsi": today['RSI'], "ma_signal": ma_msg, "macd_signal": macd_msg, "kd_signal": kd_msg, "vol_signal": vol_msg,
@@ -388,31 +323,23 @@ def run_sniper_bot():
                 "foreign_buy": foreign_buy_vols, "sitc_buy": sitc_buy_vols, "dividend_yield": dividend_yield
             }
             
-            # 🚨 雷達火力全開：只要滿足其中一項極短線轉折特徵，立刻發布通知！
             is_triggered = golden_cross or kd_golden_cross or macd_zero_cross or macd_converge or volume_surge or momentum_breakout
             
             if is_triggered: 
                 print(f"\n[發現獵物] {company_name} ({ticker}) 觸發警報！")
                 ticker_digits = ticker.replace('.TW', '').replace('.TWO', '')
                 
-                print("   > 正在精準抓取 Yahoo/Google 各 3 則新聞...")
                 yahoo_news, google_news = fetch_stock_news_v2(ticker, company_name)
-                print("   > 正在搜尋 PTT 股版最新 1 則討論與日期...")
                 ptt_post = fetch_latest_ptt_post(ticker_digits)
-                print("   > 正在搜尋 Dcard 股市版最新 1 則討論與日期...")
                 dcard_post = fetch_latest_dcard_post(ticker_digits)
                 
-                print("   > 正在派出輕量化 AI 進行決策分析...")
                 ai_complete_report = analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post)
                 
-                # 🎯 推播字眼修正：完整加入 KD 與 MACD 判讀
-                line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']:.2f} / 爆發量：{today['Volume']/today['5Vol_MA']:.1f}倍\n技術面：{kd_msg} | {macd_msg} | {ma_msg}\n籌碼動向 ({chip_source_msg})：單日外資買賣超 {foreign_buy_vols} 張 | 單日投信買賣超 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
+                line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']:.2f} / {vol_msg}\n技術面：{kd_msg} | {macd_msg} | {ma_msg}\n籌碼 ({chip_source_msg})：外資買賣 {foreign_buy_vols} 張 | 投信買賣 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
                 send_line_notify(line_msg)
-                
-                print("   > [防禦機制] 進入 15 秒冷卻緩衝區...")
                 time.sleep(15)
             else:
-                print(f"- {company_name} ({ticker}) 目前即時指標平淡 ({today['Close']:.2f})，繼續潛伏。")
+                print(f"- {company_name} ({ticker}) 指標平淡，繼續潛伏。")
                 
             time.sleep(0.5)
         except Exception as e:
