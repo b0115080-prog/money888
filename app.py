@@ -256,4 +256,3 @@ if not df_display.empty:
     )
 else:
     st.info("📭 目前清單為空，或正在等待開盤數據中。")
-
