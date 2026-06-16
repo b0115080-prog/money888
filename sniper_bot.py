@@ -164,14 +164,14 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
     ptt_text = f"標題：{ptt_post['title']} (發文日期：{ptt_post['date']})" if ptt_post else "今日無相關專文討論"
     dcard_text = f"標題：{dcard_post['title']} (發文日期：{dcard_post['date']})" if dcard_post else "今日無相關專文討論"
     
-    # 🎯 重構版 Prompt：強制糾正籌碼張冠李戴，並強迫聯網閱讀最新新聞
+    # 🎯 重構版 Prompt：同步加入 KD 訊號與 MACD 精細判讀
     prompt = f"""
     你現在是精通台股基本面、籌碼面與社群輿情（PTT/Dcard）的量化交易員。
     標的：{company_name} ({ticker})
     
     【目前技術與籌碼狀態】
-    - RSI(14日)：{tech_info['rsi']:.1f} | 均線：{tech_info['ma_signal']} | MACD：{tech_info['macd_signal']}
-    - 官方本益比：{tech_info['pe']} 
+    - KD指標：{tech_info.get('kd_signal', '無')} | MACD：{tech_info['macd_signal']} | 均線：{tech_info['ma_signal']}
+    - RSI(14日)：{tech_info['rsi']:.1f} | 官方本益比：{tech_info['pe']} 
     - 近日單日外資買賣超：{tech_info.get('foreign_buy', 0)}張 
     - 近日單日投信買賣超：{tech_info.get('sitc_buy', 0)}張
     
@@ -261,7 +261,7 @@ def send_line_notify(message):
 
 # --- 4. 核心掃描策略 ---
 def run_sniper_bot():
-    print("[主力狙擊機器人 - 雙軌即時旗艦版] 啟動！開始掃描...\n")
+    print("[主力狙擊機器人 - 高敏感度雷達旗艦版] 啟動！開始掃描...\n")
     legal_data, pe_data = fetch_twse_daily_data()
     
     try:
@@ -328,41 +328,70 @@ def run_sniper_bot():
             except Exception as fugle_e:
                 print(f"⚠️ 無法取得 {ticker} 即時報價，使用延遲資料: {fugle_e}")
 
-            # 技術指標計算
+            # === 🚀 核心升級：四維技術指標同步計算 ===
             hist['5MA'] = hist['Close'].rolling(window=5).mean()
             hist['20MA'] = hist['Close'].rolling(window=20).mean()
             hist['5Vol_MA'] = hist['Volume'].rolling(window=5).mean()
             
+            # RSI (14日)
             delta = hist['Close'].diff()
             up, down = delta.clip(lower=0), -1 * delta.clip(upper=0)
             hist['RSI'] = 100 - (100 / (1 + (up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean())))
             
+            # MACD 與 柱狀圖 (MACD_Hist)
             exp1 = hist['Close'].ewm(span=12, adjust=False).mean()
             exp2 = hist['Close'].ewm(span=26, adjust=False).mean()
             hist['MACD'] = exp1 - exp2
             hist['Signal'] = hist['MACD'].ewm(span=9, adjust=False).mean()
+            hist['MACD_Hist'] = hist['MACD'] - hist['Signal']
+            
+            # KD (9日)
+            low_min = hist['Low'].rolling(window=9).min()
+            high_max = hist['High'].rolling(window=9).max()
+            hist['RSV'] = 100 * ((hist['Close'] - low_min) / (high_max - low_min))
+            hist['K'] = hist['RSV'].ewm(com=2, adjust=False).mean()
+            hist['D'] = hist['K'].ewm(com=2, adjust=False).mean()
             
             today, yesterday = hist.iloc[-1], hist.iloc[-2]
             
-            # 訊號邏輯
+            # === 🎯 訊號邏輯 (高敏觸發) ===
+            # 1. 均線與量能
             golden_cross = (yesterday['5MA'] <= yesterday['20MA']) and (today['5MA'] > today['20MA'])
-            macd_reversal = (yesterday['MACD'] <= yesterday['Signal']) and (today['MACD'] > today['Signal'])
-            volume_surge = today['Volume'] > (today['5Vol_MA'] * 2)
+            volume_surge = today['Volume'] > (today['5Vol_MA'] * 1.5)  # 敏感度提升：量能 1.5 倍即可
             bullish_alignment = (today['Close'] > today['5MA']) and (today['5MA'] > today['20MA'])
             strong_surge = today['Close'] >= (yesterday['Close'] * 1.04)
             momentum_breakout = bullish_alignment and strong_surge
             
+            # 2. KD 訊號
+            kd_golden_cross = (yesterday['K'] <= yesterday['D']) and (today['K'] > today['D'])
+            
+            # 3. MACD 訊號 (捕捉底部負柱收斂)
+            macd_zero_cross = (yesterday['MACD_Hist'] < 0) and (today['MACD_Hist'] >= 0)
+            macd_converge = (today['MACD_Hist'] < 0) and (today['MACD_Hist'] > yesterday['MACD_Hist'])
+            
+            # === 狀態字串生成 ===
             ma_msg = "黃金交叉！" if golden_cross else ("多頭強勢排列！" if bullish_alignment else "無明顯交會")
-            macd_msg = "底部反轉！" if macd_reversal else ("MACD紅柱維持" if today['MACD'] > today['Signal'] else "柱狀圖正常")
+            kd_msg = "🔥 KD金叉" if kd_golden_cross else ("🟢 K>D" if today['K'] > today['D'] else "🔴 K<D")
+            
+            if macd_zero_cross:
+                macd_msg = "🔥 底部反轉(翻紅)"
+            elif macd_converge:
+                macd_msg = "🟡 負柱收斂"
+            else:
+                macd_msg = "🟢 柱狀圖正常" if today['MACD_Hist'] > 0 else "🔴 偏空下探"
+                
             vol_msg = f"爆發量！({today['Volume']/today['5Vol_MA']:.1f}倍)" if volume_surge else "量能平穩"
             
             tech_info = {
-                "rsi": today['RSI'], "ma_signal": ma_msg, "macd_signal": macd_msg, "vol_signal": vol_msg,
+                "rsi": today['RSI'], "ma_signal": ma_msg, "macd_signal": macd_msg, "kd_signal": kd_msg, "vol_signal": vol_msg,
                 "pe": official_pe if official_pe != '無' else info.get("trailingPE", "無資料"),
                 "foreign_buy": foreign_buy_vols, "sitc_buy": sitc_buy_vols, "dividend_yield": dividend_yield
             }
             
-            if golden_cross or macd_reversal or volume_surge or momentum_breakout: 
+            # 🚨 雷達火力全開：只要滿足其中一項極短線轉折特徵，立刻發布通知！
+            is_triggered = golden_cross or kd_golden_cross or macd_zero_cross or macd_converge or volume_surge or momentum_breakout
+            
+            if is_triggered: 
                 print(f"\n[發現獵物] {company_name} ({ticker}) 觸發警報！")
                 ticker_digits = ticker.replace('.TW', '').replace('.TWO', '')
                 
@@ -376,8 +405,8 @@ def run_sniper_bot():
                 print("   > 正在派出輕量化 AI 進行決策分析...")
                 ai_complete_report = analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post)
                 
-                # 🎯 推播字眼修正：嚴格正名為「單日買賣超」
-                line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']:.2f} / 爆發量：{today['Volume']/today['5Vol_MA']:.1f}倍\n技術面：{ma_msg} | {macd_msg}\n籌碼動向 ({chip_source_msg})：單日外資買賣超 {foreign_buy_vols} 張 | 單日投信買賣超 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
+                # 🎯 推播字眼修正：完整加入 KD 與 MACD 判讀
+                line_msg = f"\n🎯 發現獵物：{company_name} ({ticker})\n股價：{today['Close']:.2f} / 爆發量：{today['Volume']/today['5Vol_MA']:.1f}倍\n技術面：{kd_msg} | {macd_msg} | {ma_msg}\n籌碼動向 ({chip_source_msg})：單日外資買賣超 {foreign_buy_vols} 張 | 單日投信買賣超 {sitc_buy_vols} 張\n----------------------\n{ai_complete_report}\n----------------------"
                 send_line_notify(line_msg)
                 
                 print("   > [防禦機制] 進入 15 秒冷卻緩衝區...")
@@ -391,3 +420,4 @@ def run_sniper_bot():
 
 if __name__ == "__main__":
     run_sniper_bot()
+
