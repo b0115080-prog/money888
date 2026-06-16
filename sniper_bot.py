@@ -22,13 +22,24 @@ def safe_val(val, default=0):
     try: return float(val) if not pd.isna(val) else default
     except: return default
 
+def parse_vol(val):
+    if isinstance(val, str):
+        try: return int(val.replace(',', '')) // 1000
+        except ValueError: return 0
+    elif isinstance(val, (int, float)):
+        return int(val) // 1000
+    return 0
+
 try:
     SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQz7MmTCJQAkMs8qpyLtpQOuZF4LpW3f3or51CH0USOIFLgEATnjUcX4lP6JfKl7RPTciy4-cEDPYmg/pub?output=csv"
     df_tickers = pd.read_csv(SHEET_CSV_URL, header=None) 
-    tickers = df_tickers.iloc[:, 0].dropna().astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip().tolist()
+    df_tickers = df_tickers.dropna(subset=[0])
+    df_tickers[0] = df_tickers[0].astype(str).str.replace(r'[^\x00-\x7F]+', '', regex=True).str.strip()
+    tickers = df_tickers.iloc[:, 0].tolist()
     target_tickers = list(dict.fromkeys([t for t in tickers if t.lower() != 'nan' and t]))
-    print(f"✅ 成功讀取 {len(target_tickers)} 檔追蹤標的！")
-except:
+    print(f"✅ 成功讀取並淨化 {len(target_tickers)} 檔追蹤標的！")
+except Exception as e:
+    print(f"⚠️ 讀取 Google 表單失敗，使用備用清單。錯誤: {e}")
     target_tickers = ["0050.TW", "0052.TW"]
 
 def fetch_stock_news_v2(ticker, company_name):
@@ -51,34 +62,34 @@ def fetch_stock_news_v2(ticker, company_name):
     return yahoo_news[:3], google_news[:3]
 
 def fetch_market_daily_data():
-    """🚀 終極官方時光機：強制鎖定台灣時間與單日重試"""
+    """🚀 官方時光機 (純上市版)：針對單日強制重試 2 次"""
     legal_data = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    # 🎯 絕對台灣時間 (UTC+8)
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
 
     # 1. 上市 OpenAPI
-    try:
-        res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", headers=headers, timeout=8)
-        if res.status_code == 200 and len(res.json()) > 0:
-            for item in res.json():
-                legal_data[item['Code'].strip()] = {
-                    'foreign': item.get('ForeignInvestmentIncludeForeignDealersBuyBuyOver', item.get('ForeignInvestmentBuyBuyOver', '0')),
-                    'sitc': item.get('InvestmentTrustBuyBuyOver', '0'),
-                    'source': '官方盤後最新'
-                }
-    except: pass
+    for _ in range(2):
+        try:
+            res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", headers=headers, timeout=8)
+            if res.status_code == 200 and len(res.json()) > 0:
+                for item in res.json():
+                    legal_data[item['Code'].strip()] = {
+                        'foreign': item.get('ForeignInvestmentIncludeForeignDealersBuyBuyOver', item.get('ForeignInvestmentBuyBuyOver', '0')),
+                        'sitc': item.get('InvestmentTrustBuyBuyOver', '0'),
+                        'source': '官方盤後最新'
+                    }
+                break
+        except: time.sleep(1)
 
     # 2. 上市 官方歷史時光機備援
     if not legal_data:
         for i in range(1, 6):
             dt = tw_now - datetime.timedelta(days=i)
-            if dt.weekday() >= 5: continue
+            if dt.weekday() >= 5: continue 
             date_str = dt.strftime("%Y%m%d")
             
             day_success = False
-            for _ in range(3): # 🚀 對同一天強制重試 3 次
+            for _ in range(2): # 🚀 單日強制重試 2 次
                 try:
                     res = requests.get(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL", headers=headers, timeout=5)
                     data = res.json()
@@ -96,47 +107,49 @@ def fetch_market_daily_data():
                         day_success = True
                         break
                 except: time.sleep(1)
-            if day_success: break
-
-    # 3. 上櫃 OpenAPI
-    tpex_found = False
-    try:
-        res = requests.get("https://openapi.tpex.org.tw/v1/tpex_38", headers=headers, timeout=8)
-        if res.status_code == 200 and len(res.json()) > 0:
-            for item in res.json():
-                legal_data[item['SecuritiesCompanyCode'].strip()] = {
-                    'foreign': item.get('ForeignInvestorsNetBuySell', '0'),
-                    'sitc': item.get('InvestmentTrustsNetBuySell', '0'),
-                    'source': '官方盤後最新'
-                }
-            tpex_found = True
-    except: pass
-
-    # 4. 上櫃 官方歷史時光機備援
-    if not tpex_found:
-        for i in range(1, 6):
-            dt = tw_now - datetime.timedelta(days=i)
-            if dt.weekday() >= 5: continue
-            date_str = f"{dt.year-1911}/{(dt).strftime('%m/%d')}"
-            
-            day_success = False
-            for _ in range(3):
-                try:
-                    res = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&d={date_str}&se=EW&t=D", headers=headers, timeout=5)
-                    data = res.json()
-                    if data.get('iTotalRecords', 0) > 0:
-                        for row in data['aaData']:
-                            code = row[0].strip()
-                            f_buy = int(row[4].replace(',', '')) + int(row[7].replace(',', ''))
-                            s_buy = int(row[10].replace(',', ''))
-                            if code not in legal_data:
-                                legal_data[code] = {'foreign': str(f_buy), 'sitc': str(s_buy), 'source': f'官方歷史({dt.strftime("%m/%d")})'}
-                        day_success = True
-                        break
-                except: time.sleep(1)
-            if day_success: break
+            if day_success: break 
 
     return legal_data
+
+def fetch_finmind_chips(ticker_digits):
+    """🚀 終極備援：自動略過 0 的日期，尋找上一個真實交易日"""
+    try:
+        tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+        start_date = (tw_now - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+            "data_id": str(ticker_digits),
+            "start_date": start_date
+        }
+        res = requests.get(url, params=params, timeout=5)
+        data = res.json()
+        
+        if data.get("msg") == "success" and len(data.get("data", [])) > 0:
+            df = pd.DataFrame(data["data"])
+            
+            # 依日期降冪排列 (從最新到最舊)
+            dates = sorted(df['date'].unique(), reverse=True)
+            
+            for date in dates:
+                df_date = df[df['date'] == date]
+                f_df = df_date[df_date['name'].str.contains('外資')]
+                foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
+                
+                s_df = df_date[df_date['name'].str.contains('投信')]
+                sitc_buy = (s_df['buy'].sum() - s_df['sell'].sum()) // 1000
+                
+                # 💡 核心邏輯：只要不是 0，就代表找到真實資料，立刻回傳！
+                if foreign_buy != 0 or sitc_buy != 0:
+                    short_date = date[5:].replace('-', '/')
+                    return int(foreign_buy), int(sitc_buy), f"FinMind歷史({short_date})"
+            
+            # 如果這10天真的全是0，只好回傳最新日期的0
+            latest_date = dates[0][5:].replace('-', '/')
+            return 0, 0, f"FinMind歷史({latest_date})"
+    except Exception as e:
+        print(f"⚠️ FinMind 連線失敗: {e}")
+    return "未取得", "未取得", "⚠️ 查無資料"
 
 def fetch_latest_ptt_post(ticker_digits):
     try:
@@ -166,6 +179,7 @@ def fetch_latest_dcard_post(ticker_digits):
     except: pass
     return None
 
+# --- 3. AI 判讀模組 ---
 def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post):
     key1 = os.getenv("GEMINI_API_KEY")
     key2 = os.getenv("GEMINI_API_KEY_BACKUP")
@@ -181,7 +195,8 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
     ptt_text = f"標題：{ptt_post['title']} ({ptt_post['date']})" if ptt_post else "今日無專文"
     dcard_text = f"標題：{dcard_post['title']} ({dcard_post['date']})" if dcard_post else "今日無專文"
     
-    prompt = f"""    你現在是精通台股基本面、籌碼面與社群輿情的頂尖量化操盤手。請幫我對以下標的進行深度的反市場心理學研判。
+    prompt = f"""    
+    你現在是精通台股基本面、籌碼面與社群輿情的頂尖量化操盤手。請幫我對以下標的進行深度的反市場心理學研判。
 
     標的：{company_name} ({ticker})
 
@@ -224,7 +239,7 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
 
     for idx, strat in enumerate(strategies):
         try:
-            print(f"   > 🛡️ 正在嘗試防線 {idx+1}: {strat['desc']}...")
+            print(f"   > 🛡️ 正在嘗試 AI 防線 {idx+1}: {strat['desc']}...")
             client = genai.Client(api_key=strat["key"].strip())
             response = client.models.generate_content(model=strat["model"], contents=prompt)
             return response.text
@@ -232,17 +247,22 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
             if "429" in str(e) and idx < len(strategies) - 1:
                 time.sleep(5)
                 continue
-    return "❌ 所有通道均已達上限，略過 AI 報告。"
+    return "❌ 所有 AI 通道均已達上限，略過 AI 報告。"
 
 def send_line_notify(message):
-    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID: return
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_USER_ID: 
+        print("⚠️ 未設定 LINE 金鑰，略過推播。")
+        return
     try:
         configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.push_message(PushMessageRequest(to=LINE_USER_ID, messages=[TextMessage(text=message)]))
-    except: pass
+        print("📲 LINE 通知發送成功！") 
+    except Exception as e:
+        print(f"⚠️ LINE 通知發送失敗: {e}")
 
+# --- 4. 核心掃描策略 ---
 def run_sniper_bot():
     print("[主力狙擊機器人 - 官方時光機防彈版] 啟動！\n")
     legal_data = fetch_market_daily_data()
@@ -262,6 +282,9 @@ def run_sniper_bot():
             fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
             company_name = stock.info.get("shortName", ticker)
             
+            foreign_buy, sitc_buy, chip_source_msg = "未取得", "未取得", "⚠️ 查無資料"
+            
+            # 優先讀取官方數據
             stock_legal = legal_data.get(fugle_symbol)
             if stock_legal:
                 try:
@@ -270,12 +293,17 @@ def run_sniper_bot():
                     foreign_buy = int(float(f_buy_raw)) // 1000
                     sitc_buy = int(float(s_buy_raw)) // 1000
                     chip_source_msg = stock_legal.get('source', '官方盤後')
-                    f_str, s_str = f"{foreign_buy} 張", f"{sitc_buy} 張"
-                except:
-                    f_str, s_str, chip_source_msg = "未取得", "未取得", "解析異常"
-            else:
-                f_str, s_str, chip_source_msg = "未取得", "未取得", "⚠️ 查無資料"
+                except: pass
             
+            # 🚀 智能非零追溯：若官方沒資料，或是官方給出 0，啟動 FinMind 往前撈！
+            if foreign_buy in ["未取得", 0] and sitc_buy in ["未取得", 0]:
+                f_fm, s_fm, source_fm = fetch_finmind_chips(fugle_symbol)
+                if isinstance(f_fm, int):
+                    foreign_buy, sitc_buy, chip_source_msg = f_fm, s_fm, source_fm
+            
+            f_str = f"{foreign_buy} 張" if isinstance(foreign_buy, int) else "未取得"
+            s_str = f"{sitc_buy} 張" if isinstance(sitc_buy, int) else "未取得"
+
             if fugle_stock:
                 try:
                     quote = fugle_stock.intraday.quote(symbol=fugle_symbol)
