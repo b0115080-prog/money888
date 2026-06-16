@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 import time
+import datetime
 from fugle_marketdata import RestClient
 from dotenv import load_dotenv
 
@@ -12,7 +13,7 @@ st.set_page_config(page_title="台股主力狙擊指揮所", page_icon="🎯", l
 load_dotenv()
 
 # --- 2. 核心數據抓取函式 ---
-@st.cache_data(ttl=60) # 🚀 60秒快取：保護試算表連線
+@st.cache_data(ttl=60) 
 def get_clean_tickers():
     """抓取並淨化 Google 試算表追蹤清單"""
     try:
@@ -25,39 +26,94 @@ def get_clean_tickers():
     except:
         return ["0050.TW", "0052.TW"]
 
-@st.cache_data(ttl=300) # 🚀 300秒快取：保護證交所API，避免被官方封鎖IP
+@st.cache_data(ttl=300) 
 def fetch_market_daily_data():
-    """全面涵蓋上市與上櫃，精準抓取官方盤後籌碼數據"""
+    """🚀 旗艦版：OpenAPI + 時光機歷史備援系統 (絕對抓得到前一日資料)"""
     legal_data, pe_data = {}, {}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json"
     }
 
-    # 1. 上市籌碼
+    # ==========================
+    # 第一道防線：上市 (TWSE) 籌碼
+    # ==========================
     try:
         res = requests.get("https://openapi.twse.com.tw/v1/fund/T86", headers=headers, timeout=5)
-        if res.status_code == 200:
+        if res.status_code == 200 and len(res.json()) > 0:
             for item in res.json():
                 code = item.get('Code', '').strip()
                 if code:
-                    legal_data[code] = {
-                        'foreign': item.get('ForeignInvestmentIncludeForeignDealersBuyBuyOver', item.get('ForeignInvestmentBuyBuyOver', '0')),
-                        'sitc': item.get('InvestmentTrustBuyBuyOver', '0')
-                    }
+                    f_buy = item.get('ForeignInvestmentIncludeForeignDealersBuyBuyOver', item.get('ForeignInvestmentBuyBuyOver', '0'))
+                    s_buy = item.get('InvestmentTrustBuyBuyOver', '0')
+                    legal_data[code] = {'foreign': f_buy, 'sitc': s_buy, 'source': '官方即時'}
     except: pass
 
-    # 2. 上櫃籌碼
+    # 🚨 時光機救援：如果 OpenAPI 中午失憶，強制去歷史資料庫挖昨天的上市籌碼
+    if not legal_data:
+        today = datetime.datetime.now()
+        for i in range(1, 6): # 往前找 5 天
+            date_str = (today - datetime.timedelta(days=i)).strftime("%Y%m%d")
+            try:
+                res = requests.get(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL", headers=headers, timeout=3)
+                data = res.json()
+                if data.get('stat') == 'OK' and data.get('data'):
+                    fields = data['fields']
+                    f_idx = next(i for i, f in enumerate(fields) if '外陸資買賣超股數(不含外資自營商)' in f or '外資及陸資買賣超股數' in f)
+                    fd_idx = next((i for i, f in enumerate(fields) if '外資自營商買賣超股數' in f), -1)
+                    s_idx = next(i for i, f in enumerate(fields) if '投信買賣超股數' in f)
+                    for row in data['data']:
+                        code = row[0].strip()
+                        f_buy = int(row[f_idx].replace(',', ''))
+                        if fd_idx != -1: f_buy += int(row[fd_idx].replace(',', ''))
+                        s_buy = int(row[s_idx].replace(',', ''))
+                        legal_data[code] = {'foreign': str(f_buy), 'sitc': str(s_buy), 'source': '時光機備援'}
+                    break # 成功挖到資料，停止回溯
+            except: pass
+
+    # ==========================
+    # 第二道防線：上櫃 (TPEx) 籌碼
+    # ==========================
+    tpex_data_found = False
     try:
         res = requests.get("https://openapi.tpex.org.tw/v1/tpex_38", headers=headers, timeout=5)
-        if res.status_code == 200:
+        if res.status_code == 200 and len(res.json()) > 0:
             for item in res.json():
                 code = item.get('SecuritiesCompanyCode', '').strip()
                 if code:
-                    legal_data[code] = {
-                        'foreign': item.get('ForeignInvestorsNetBuySell', '0'),
-                        'sitc': item.get('InvestmentTrustsNetBuySell', '0')
-                    }
+                    f_buy = item.get('ForeignInvestorsNetBuySell', '0')
+                    s_buy = item.get('InvestmentTrustsNetBuySell', '0')
+                    legal_data[code] = {'foreign': f_buy, 'sitc': s_buy, 'source': '官方即時'}
+                    tpex_data_found = True
+    except: pass
+
+    # 🚨 時光機救援：如果上櫃 OpenAPI 也失憶，強制去歷史資料庫挖昨天的上櫃籌碼
+    if not tpex_data_found:
+        today = datetime.datetime.now()
+        for i in range(1, 6):
+            date_str = f"{today.year-1911}/{(today - datetime.timedelta(days=i)).strftime('%m/%d')}"
+            try:
+                res = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&d={date_str}&se=EW&t=D", headers=headers, timeout=3)
+                data = res.json()
+                if data.get('iTotalRecords', 0) > 0:
+                    for row in data['aaData']:
+                        code = row[0].strip()
+                        f_buy = row[4].replace(',', '') 
+                        fd_buy = row[7].replace(',', '') 
+                        total_f_buy = int(f_buy) + int(fd_buy)
+                        s_buy = row[10].replace(',', '')
+                        if code not in legal_data:
+                            legal_data[code] = {'foreign': str(total_f_buy), 'sitc': str(s_buy), 'source': '時光機備援'}
+                    break
+            except: pass
+
+    # 3. 本益比
+    try:
+        pe_res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL", headers=headers, timeout=5)
+        if pe_res.status_code == 200:
+            for item in pe_res.json():
+                code = item.get('Code', '').strip()
+                if code: pe_data[code] = item
     except: pass
 
     return legal_data, pe_data
@@ -67,7 +123,6 @@ def fetch_market_daily_data():
 # ==========================================
 @st.cache_data(ttl=60, show_spinner=False)
 def generate_dashboard_data(tickers, legal_data, fugle_api_key):
-    """將所有 API 下載與技術指標計算，包裝進快取記憶體中"""
     summary_rows = []
     
     try:
@@ -84,7 +139,7 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
             
             fugle_symbol = ticker.replace('.TW', '').replace('.TWO', '').strip()
             
-            # --- 籌碼邏輯 ---
+            # --- 籌碼邏輯 (套用時光機資料) ---
             stock_legal = legal_data.get(fugle_symbol)
             if stock_legal:
                 try:
@@ -92,11 +147,11 @@ def generate_dashboard_data(tickers, legal_data, fugle_api_key):
                     s_buy_raw = str(stock_legal.get('sitc', '0')).replace(',', '')
                     foreign_buy = int(float(f_buy_raw)) // 1000
                     sitc_buy = int(float(s_buy_raw)) // 1000
-                    chip_source = "官方盤後"
+                    chip_source = stock_legal.get('source', '官方盤後')
                 except:
                     foreign_buy, sitc_buy, chip_source = "未取得", "未取得", "解析異常"
             else:
-                foreign_buy, sitc_buy, chip_source = "未取得", "未取得", "⚠️ 等待發布"
+                foreign_buy, sitc_buy, chip_source = "未取得", "未取得", "⚠️ 查無資料"
 
             # --- 即時報價 ---
             if fugle_stock:
@@ -225,7 +280,7 @@ if not df_display.empty:
     st.write("---")
     st.dataframe(
         df_display.style.map(
-            lambda v: 'background-color: #ff4b4b; color: white;' if v in ["🔥 爆量真突破", "🔥 黃金交叉", "🔥 底部反轉"] else ('background-color: #262730; color: #a3a8b4;' if v in ["🟡 跌破5MA觀望", "🔴 偏空下探", "🔴 K<D", "⚠️ 等待發布"] else ''),
+            lambda v: 'background-color: #ff4b4b; color: white;' if v in ["🔥 爆量真突破", "🔥 黃金交叉", "🔥 底部反轉"] else ('background-color: #262730; color: #a3a8b4;' if v in ["🟡 跌破5MA觀望", "🔴 偏空下探", "🔴 K<D", "⚠️ 查無資料"] else ''),
             subset=['即時狀態', 'KD訊號', 'MACD訊號', '籌碼來源']
         ),
         use_container_width=True,
