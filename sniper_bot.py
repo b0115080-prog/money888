@@ -112,16 +112,12 @@ def fetch_market_daily_data():
     return legal_data
 
 def fetch_finmind_chips(ticker_digits):
-    """🚀 終極備援：自動略過 0 的日期，尋找上一個真實交易日"""
+    """🚀 終極備援：中英雙語防彈解析，自動略過 0 的日期，尋找上一個真實交易日"""
     try:
         tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
         start_date = (tw_now - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
         url = "https://api.finmindtrade.com/api/v4/data"
-        params = {
-            "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
-            "data_id": str(ticker_digits),
-            "start_date": start_date
-        }
+        params = {"dataset": "TaiwanStockInstitutionalInvestorsBuySell", "data_id": str(ticker_digits), "start_date": start_date}
         res = requests.get(url, params=params, timeout=5)
         data = res.json()
         
@@ -133,13 +129,15 @@ def fetch_finmind_chips(ticker_digits):
             
             for date in dates:
                 df_date = df[df['date'] == date]
-                f_df = df_date[df_date['name'].str.contains('外資')]
-                foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
                 
-                s_df = df_date[df_date['name'].str.contains('投信')]
+                # 💡 核心修正：同時捕捉中英文
+                f_df = df_date[df_date['name'].str.contains('Foreign|外資', case=False, na=False)]
+                s_df = df_date[df_date['name'].str.contains('Investment|投信', case=False, na=False)]
+                
+                foreign_buy = (f_df['buy'].sum() - f_df['sell'].sum()) // 1000
                 sitc_buy = (s_df['buy'].sum() - s_df['sell'].sum()) // 1000
                 
-                # 💡 核心邏輯：只要不是 0，就代表找到真實資料，立刻回傳！
+                # 只要不是 0，就代表找到真實資料，立刻回傳！
                 if foreign_buy != 0 or sitc_buy != 0:
                     short_date = date[5:].replace('-', '/')
                     return int(foreign_buy), int(sitc_buy), f"FinMind歷史({short_date})"
@@ -179,7 +177,6 @@ def fetch_latest_dcard_post(ticker_digits):
     except: pass
     return None
 
-# --- 3. AI 判讀模組 ---
 def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, google_news, tech_info, ptt_post, dcard_post):
     key1 = os.getenv("GEMINI_API_KEY")
     key2 = os.getenv("GEMINI_API_KEY_BACKUP")
@@ -195,7 +192,7 @@ def analyze_stock_with_gemini_ultra_lean(ticker, company_name, yahoo_news, googl
     ptt_text = f"標題：{ptt_post['title']} ({ptt_post['date']})" if ptt_post else "今日無專文"
     dcard_text = f"標題：{dcard_post['title']} ({dcard_post['date']})" if dcard_post else "今日無專文"
     
-    prompt = f"""    
+    prompt = f"""
     你現在是精通台股基本面、籌碼面與社群輿情的頂尖量化操盤手。請幫我對以下標的進行深度的反市場心理學研判。
 
     標的：{company_name} ({ticker})
@@ -264,7 +261,7 @@ def send_line_notify(message):
 
 # --- 4. 核心掃描策略 ---
 def run_sniper_bot():
-    print("[主力狙擊機器人 - 官方時光機防彈版] 啟動！\n")
+    print("[主力狙擊機器人 - 純上市防彈版] 啟動！\n")
     legal_data = fetch_market_daily_data()
     
     try: fugle_stock = RestClient(api_key=FUGLE_API_KEY).stock
@@ -295,7 +292,7 @@ def run_sniper_bot():
                     chip_source_msg = stock_legal.get('source', '官方盤後')
                 except: pass
             
-            # 🚀 智能非零追溯：若官方沒資料，或是官方給出 0，啟動 FinMind 往前撈！
+            # 🚀 智能非零追溯：若官方沒資料，或是官方給出 0，啟動 FinMind 往前撈直到找到非零數字！
             if foreign_buy in ["未取得", 0] and sitc_buy in ["未取得", 0]:
                 f_fm, s_fm, source_fm = fetch_finmind_chips(fugle_symbol)
                 if isinstance(f_fm, int):
